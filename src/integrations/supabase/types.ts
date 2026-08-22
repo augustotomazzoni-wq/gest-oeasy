@@ -1129,7 +1129,14 @@ export type Database = {
       is_org_member: { Args: { _org: string }; Returns: boolean }
     }
     Enums: {
-      app_role: "admin" | "financeiro" | "advogado" | "consulta"
+      app_role:
+        | "admin"
+        | "financeiro"
+        | "advogado"
+        | "consulta"
+        | "socio_gestor"
+        | "lancador"
+        | "cobranca"
       category_type: "receita" | "despesa"
       flow_type:
         | "escritorio_recebe_total"
@@ -1285,7 +1292,15 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      app_role: ["admin", "financeiro", "advogado", "consulta"],
+      app_role: [
+        "admin",
+        "financeiro",
+        "advogado",
+        "consulta",
+        "socio_gestor",
+        "lancador",
+        "cobranca",
+      ],
       category_type: ["receita", "despesa"],
       flow_type: [
         "escritorio_recebe_total",
