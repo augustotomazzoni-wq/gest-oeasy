@@ -20,6 +20,7 @@ import { Route as AuthenticatedDashboardRouteImport } from './routes/_authentica
 import { Route as AuthenticatedParcelasRouteImport } from './routes/_authenticated/parcelas'
 import { Route as AuthenticatedProcessosRouteImport } from './routes/_authenticated/processos'
 import { Route as AuthenticatedRepassesRouteImport } from './routes/_authenticated/repasses'
+import { Route as AuthenticatedUsuariosRouteImport } from './routes/_authenticated/usuarios'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -76,6 +77,11 @@ const AuthenticatedRepassesRoute = AuthenticatedRepassesRouteImport.update({
   path: '/repasses',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedUsuariosRoute = AuthenticatedUsuariosRouteImport.update({
+  id: '/usuarios',
+  path: '/usuarios',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -88,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/parcelas': typeof AuthenticatedParcelasRoute
   '/processos': typeof AuthenticatedProcessosRoute
   '/repasses': typeof AuthenticatedRepassesRoute
+  '/usuarios': typeof AuthenticatedUsuariosRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -100,6 +107,7 @@ export interface FileRoutesByTo {
   '/parcelas': typeof AuthenticatedParcelasRoute
   '/processos': typeof AuthenticatedProcessosRoute
   '/repasses': typeof AuthenticatedRepassesRoute
+  '/usuarios': typeof AuthenticatedUsuariosRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -114,6 +122,7 @@ export interface FileRoutesById {
   '/_authenticated/parcelas': typeof AuthenticatedParcelasRoute
   '/_authenticated/processos': typeof AuthenticatedProcessosRoute
   '/_authenticated/repasses': typeof AuthenticatedRepassesRoute
+  '/_authenticated/usuarios': typeof AuthenticatedUsuariosRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -128,6 +137,7 @@ export interface FileRouteTypes {
     | '/parcelas'
     | '/processos'
     | '/repasses'
+    | '/usuarios'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -140,6 +150,7 @@ export interface FileRouteTypes {
     | '/parcelas'
     | '/processos'
     | '/repasses'
+    | '/usuarios'
   id:
     | '__root__'
     | '/'
@@ -153,6 +164,7 @@ export interface FileRouteTypes {
     | '/_authenticated/parcelas'
     | '/_authenticated/processos'
     | '/_authenticated/repasses'
+    | '/_authenticated/usuarios'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -240,6 +252,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedRepassesRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/usuarios': {
+      id: '/_authenticated/usuarios'
+      path: '/usuarios'
+      fullPath: '/usuarios'
+      preLoaderRoute: typeof AuthenticatedUsuariosRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
   }
 }
 
@@ -252,6 +271,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedParcelasRoute: typeof AuthenticatedParcelasRoute
   AuthenticatedProcessosRoute: typeof AuthenticatedProcessosRoute
   AuthenticatedRepassesRoute: typeof AuthenticatedRepassesRoute
+  AuthenticatedUsuariosRoute: typeof AuthenticatedUsuariosRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
@@ -263,6 +283,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedParcelasRoute: AuthenticatedParcelasRoute,
   AuthenticatedProcessosRoute: AuthenticatedProcessosRoute,
   AuthenticatedRepassesRoute: AuthenticatedRepassesRoute,
+  AuthenticatedUsuariosRoute: AuthenticatedUsuariosRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =
