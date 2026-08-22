@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   LogOut,
   Menu,
+  Upload,
   X,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
@@ -26,6 +27,7 @@ const NAV = [
   { to: "/parcelas", label: "Parcelas e Recebimentos", icon: CalendarClock },
   { to: "/repasses", label: "Repasses a Clientes", icon: Send },
   { to: "/caixa", label: "Fluxo de Caixa", icon: Wallet },
+  { to: "/importar", label: "Importar Planilha", icon: Upload },
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ] as const;
 
