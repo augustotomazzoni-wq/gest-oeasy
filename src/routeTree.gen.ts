@@ -15,6 +15,7 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedAcordosRouteImport } from './routes/_authenticated/acordos'
 import { Route as AuthenticatedClientesRouteImport } from './routes/_authenticated/clientes'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
+import { Route as AuthenticatedParcelasRouteImport } from './routes/_authenticated/parcelas'
 import { Route as AuthenticatedProcessosRouteImport } from './routes/_authenticated/processos'
 
 const IndexRoute = IndexRouteImport.update({
@@ -46,6 +47,11 @@ const AuthenticatedDashboardRoute = AuthenticatedDashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedParcelasRoute = AuthenticatedParcelasRouteImport.update({
+  id: '/parcelas',
+  path: '/parcelas',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedProcessosRoute = AuthenticatedProcessosRouteImport.update({
   id: '/processos',
   path: '/processos',
@@ -58,6 +64,7 @@ export interface FileRoutesByFullPath {
   '/acordos': typeof AuthenticatedAcordosRoute
   '/clientes': typeof AuthenticatedClientesRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
+  '/parcelas': typeof AuthenticatedParcelasRoute
   '/processos': typeof AuthenticatedProcessosRoute
 }
 export interface FileRoutesByTo {
@@ -66,6 +73,7 @@ export interface FileRoutesByTo {
   '/acordos': typeof AuthenticatedAcordosRoute
   '/clientes': typeof AuthenticatedClientesRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
+  '/parcelas': typeof AuthenticatedParcelasRoute
   '/processos': typeof AuthenticatedProcessosRoute
 }
 export interface FileRoutesById {
@@ -76,14 +84,28 @@ export interface FileRoutesById {
   '/_authenticated/acordos': typeof AuthenticatedAcordosRoute
   '/_authenticated/clientes': typeof AuthenticatedClientesRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
+  '/_authenticated/parcelas': typeof AuthenticatedParcelasRoute
   '/_authenticated/processos': typeof AuthenticatedProcessosRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/auth' | '/acordos' | '/clientes' | '/dashboard' | '/processos'
+    | '/'
+    | '/auth'
+    | '/acordos'
+    | '/clientes'
+    | '/dashboard'
+    | '/parcelas'
+    | '/processos'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/auth' | '/acordos' | '/clientes' | '/dashboard' | '/processos'
+  to:
+    | '/'
+    | '/auth'
+    | '/acordos'
+    | '/clientes'
+    | '/dashboard'
+    | '/parcelas'
+    | '/processos'
   id:
     | '__root__'
     | '/'
@@ -92,6 +114,7 @@ export interface FileRouteTypes {
     | '/_authenticated/acordos'
     | '/_authenticated/clientes'
     | '/_authenticated/dashboard'
+    | '/_authenticated/parcelas'
     | '/_authenticated/processos'
   fileRoutesById: FileRoutesById
 }
@@ -145,6 +168,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDashboardRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/parcelas': {
+      id: '/_authenticated/parcelas'
+      path: '/parcelas'
+      fullPath: '/parcelas'
+      preLoaderRoute: typeof AuthenticatedParcelasRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/processos': {
       id: '/_authenticated/processos'
       path: '/processos'
@@ -159,6 +189,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedAcordosRoute: typeof AuthenticatedAcordosRoute
   AuthenticatedClientesRoute: typeof AuthenticatedClientesRoute
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
+  AuthenticatedParcelasRoute: typeof AuthenticatedParcelasRoute
   AuthenticatedProcessosRoute: typeof AuthenticatedProcessosRoute
 }
 
@@ -166,6 +197,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedAcordosRoute: AuthenticatedAcordosRoute,
   AuthenticatedClientesRoute: AuthenticatedClientesRoute,
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
+  AuthenticatedParcelasRoute: AuthenticatedParcelasRoute,
   AuthenticatedProcessosRoute: AuthenticatedProcessosRoute,
 }
 
