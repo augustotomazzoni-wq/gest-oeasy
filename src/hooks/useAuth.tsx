@@ -75,8 +75,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!next) {
         setProfile(null);
         setRoles([]);
+        setPerms(new Set());
         setLoading(false);
       }
+
     });
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
