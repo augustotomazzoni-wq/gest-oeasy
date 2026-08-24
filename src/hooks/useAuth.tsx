@@ -2,7 +2,40 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 
-export type AppRole = "admin" | "financeiro" | "advogado" | "consulta";
+export type AppRole =
+  | "admin"
+  | "socio_gestor"
+  | "financeiro"
+  | "lancador"
+  | "cobranca"
+  | "advogado"
+  | "consulta";
+
+export const ROLE_LABEL: Record<AppRole, string> = {
+  admin: "Administrador Principal",
+  socio_gestor: "Sócio Gestor",
+  financeiro: "Financeiro",
+  lancador: "Lançador Financeiro",
+  cobranca: "Cobrança e Recebíveis",
+  advogado: "Advogado",
+  consulta: "Consulta Restrita",
+};
+
+export type PermAction =
+  | "view"
+  | "create"
+  | "edit"
+  | "cancel_or_reverse"
+  | "approve"
+  | "export";
+
+export type GlobalAction =
+  | "manage_categories"
+  | "manage_users"
+  | "manage_roles"
+  | "view_sensitive_financials"
+  | "confirm_direct_receipt"
+  | "manage_collections";
 
 type Profile = {
   id: string;
@@ -19,7 +52,10 @@ type AuthState = {
   profile: Profile | null;
   roles: AppRole[];
   isAdmin: boolean;
+  isMainAdmin: boolean;
   canWrite: boolean;
+  can: (module: string, action: PermAction) => boolean;
+  allows: (action: GlobalAction) => boolean;
   signOut: () => Promise<void>;
 };
 
@@ -29,7 +65,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [roles, setRoles] = useState<AppRole[]>([]);
+  const [perms, setPerms] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+
 
   useEffect(() => {
     const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
