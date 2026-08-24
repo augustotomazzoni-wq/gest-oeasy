@@ -15,7 +15,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth, ROLE_LABEL, type AppRole } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -87,8 +87,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </nav>
         <div className="border-t border-sidebar-border p-4">
           <p className="truncate text-sm font-medium">{profile?.full_name || profile?.email}</p>
-          <p className="text-xs text-sidebar-foreground/60 capitalize">
-            {roles.join(", ") || "sem perfil"}
+          <p className="text-xs text-sidebar-foreground/60">
+            {roles.map((r) => ROLE_LABEL[r as AppRole] ?? r).join(", ") || "sem perfil"}
           </p>
           <Button
             variant="secondary"
