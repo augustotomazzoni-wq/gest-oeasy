@@ -99,8 +99,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         supabase.from("user_roles").select("role").eq("user_id", userId),
       ]);
       if (cancelled) return;
+      const myRoles = (roleRows ?? []).map((r) => r.role as AppRole);
       setProfile((prof as Profile) ?? null);
-      setRoles((roleRows ?? []).map((r) => r.role as AppRole));
+      setRoles(myRoles);
+
+      if (myRoles.length) {
+        const { data: permRows } = await supabase
+          .from("role_permissions")
+          .select("role_code, module, action, allowed")
+          .in("role_code", myRoles)
+          .eq("allowed", true);
+        if (cancelled) return;
+        setPerms(new Set((permRows ?? []).map((p) => `${p.module}:${p.action}`)));
+      } else {
+        setPerms(new Set());
+      }
       setLoading(false);
     })();
     return () => {
@@ -109,7 +122,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [session?.user.id]);
 
   const isAdmin = roles.includes("admin");
-  const canWrite = isAdmin || roles.includes("financeiro");
+  const isMainAdmin = isAdmin;
+  const can = (module: string, action: PermAction) =>
+    isAdmin || perms.has(`${module}:${action}`);
+  const allows = (action: GlobalAction) => isAdmin || perms.has(`global:${action}`);
+  const canWrite =
+    isAdmin || roles.includes("socio_gestor") || roles.includes("financeiro");
 
   return (
     <AuthContext.Provider
@@ -120,12 +138,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profile,
         roles,
         isAdmin,
+        isMainAdmin,
         canWrite,
+        can,
+        allows,
         signOut: async () => {
           await supabase.auth.signOut();
         },
       }}
     >
+
       {children}
     </AuthContext.Provider>
   );
