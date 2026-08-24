@@ -32,13 +32,14 @@ const NAV = [
 ] as const;
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { profile, roles, isAdmin, signOut } = useAuth();
+  const { profile, roles, allows, signOut } = useAuth();
   const [open, setOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
-  const items = isAdmin
+  const items = allows("manage_users")
     ? [...NAV, { to: "/usuarios", label: "Usuários e Acessos", icon: ShieldCheck } as const]
     : NAV;
+
 
   return (
     <div className="flex min-h-screen bg-background">
