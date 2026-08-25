@@ -16,6 +16,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 
@@ -28,6 +29,7 @@ import {
 } from "@/components/ui/select";
 import { useAuth, ROLE_LABEL, type AppRole } from "@/hooks/useAuth";
 import { dateBR } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -87,11 +89,16 @@ const GLOBAL_ACTIONS: { key: string; label: string }[] = [
   { key: "manage_collections", label: "Gerir cobranças" },
 ];
 
+const EMPTY_NEW_USER = { email: "", full_name: "", password: "", role: "consulta" as AppRole };
+
 function UsuariosPage() {
   const { isMainAdmin, allows, profile } = useAuth();
   const canManageUsers = allows("manage_users");
   const [tab, setTab] = useState<"usuarios" | "perfis">("usuarios");
+  const [newUserOpen, setNewUserOpen] = useState(false);
+  const [newUser, setNewUser] = useState(EMPTY_NEW_USER);
   const qc = useQueryClient();
+  const runCreateAppUser = useServerFn(createAppUser);
 
   const { data, isLoading } = useQuery({
     queryKey: ["usuarios"],
@@ -142,7 +149,7 @@ function UsuariosPage() {
       toast.success("Perfil de acesso atualizado.");
       void qc.invalidateQueries();
     },
-    onError: (e: Error) => toast.error("Erro", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro", { description: friendlyError(e) }),
   });
 
   const setActive = useMutation({
@@ -154,7 +161,31 @@ function UsuariosPage() {
       toast.success("Situação do usuário atualizada.");
       void qc.invalidateQueries();
     },
-    onError: (e: Error) => toast.error("Erro", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro", { description: friendlyError(e) }),
+  });
+
+  const createUser = useMutation({
+    mutationFn: async () => {
+      if (!newUser.email.trim()) throw new Error("Informe o e-mail");
+      if (!newUser.full_name.trim()) throw new Error("Informe o nome completo");
+      if (newUser.password.length < 8) throw new Error("A senha deve ter ao menos 8 caracteres");
+      await runCreateAppUser({
+        data: {
+          email: newUser.email.trim(),
+          full_name: newUser.full_name.trim(),
+          password: newUser.password,
+          role: newUser.role,
+        },
+      });
+    },
+    onSuccess: () => {
+      toast.success("Usuário criado.");
+      setNewUser(EMPTY_NEW_USER);
+      setNewUserOpen(false);
+      void qc.invalidateQueries({ queryKey: ["usuarios"] });
+    },
+    onError: (e: Error) =>
+      toast.error("Não foi possível criar o usuário", { description: friendlyError(e) }),
   });
 
   const togglePerm = useMutation({
@@ -179,7 +210,7 @@ function UsuariosPage() {
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["role-matrix"] }),
     onError: (e: Error) =>
-      toast.error("Não foi possível alterar a permissão", { description: e.message }),
+      toast.error("Não foi possível alterar a permissão", { description: friendlyError(e) }),
   });
 
   if (!canManageUsers) {
@@ -202,6 +233,82 @@ function UsuariosPage() {
       <PageHeader
         title="Usuários e Perfis de Acesso"
         description="Defina o perfil de cada pessoa do escritório e o que cada perfil pode fazer."
+        action={
+          <Dialog
+            open={newUserOpen}
+            onOpenChange={(v) => {
+              setNewUserOpen(v);
+              if (!v) setNewUser(EMPTY_NEW_USER);
+            }}
+          >
+            <DialogTrigger asChild>
+              <Button>Novo usuário</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Novo usuário</DialogTitle>
+                <DialogDescription>
+                  A pessoa poderá entrar imediatamente com o e-mail e a senha definidos aqui.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="nu-name">Nome completo</Label>
+                  <Input
+                    id="nu-name"
+                    value={newUser.full_name}
+                    onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="nu-email">E-mail</Label>
+                  <Input
+                    id="nu-email"
+                    type="email"
+                    value={newUser.email}
+                    onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="nu-pass">Senha provisória</Label>
+                  <Input
+                    id="nu-pass"
+                    type="password"
+                    value={newUser.password}
+                    onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                  />
+                  <p className="text-xs text-muted-foreground">Mínimo de 8 caracteres.</p>
+                </div>
+                <div className="space-y-2">
+                  <Label>Perfil de acesso</Label>
+                  <Select
+                    value={newUser.role}
+                    onValueChange={(v) => setNewUser({ ...newUser, role: v as AppRole })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {assignableRoles.map((r) => (
+                        <SelectItem key={r} value={r}>
+                          {ROLE_LABEL[r]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setNewUserOpen(false)}>
+                  Cancelar
+                </Button>
+                <Button onClick={() => createUser.mutate()} disabled={createUser.isPending}>
+                  {createUser.isPending ? "Criando…" : "Criar usuário"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        }
       />
 
       <div className="mb-5 flex gap-2">
@@ -294,8 +401,8 @@ function UsuariosPage() {
             </tbody>
           </table>
           <p className="border-t border-border p-3 text-xs text-muted-foreground">
-            O Administrador Principal é protegido: não pode ser desativado, rebaixado nem ter
-            o e-mail alterado. Novos usuários entram como “Consulta Restrita”.
+            O Administrador Principal é protegido: não pode ser desativado, rebaixado nem ter o
+            e-mail alterado. Novos usuários entram como “Consulta Restrita”.
           </p>
         </div>
       )}
@@ -334,8 +441,7 @@ function UsuariosPage() {
                       <tr key={m.key} className="border-b border-border/60 last:border-0">
                         <td className="p-3">{m.label}</td>
                         {ACTIONS.map((a) => {
-                          const checked =
-                            matrix?.set.has(`${def.code}|${m.key}|${a.key}`) ?? false;
+                          const checked = matrix?.set.has(`${def.code}|${m.key}|${a.key}`) ?? false;
                           return (
                             <td key={a.key} className="p-2 text-center">
                               <input

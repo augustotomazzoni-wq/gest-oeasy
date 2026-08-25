@@ -22,7 +22,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/useAuth";
+import { friendlyError } from "@/lib/errors";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/processos")({
@@ -63,6 +75,7 @@ function ProcessosPage() {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [form, setForm] = useState(EMPTY);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["processos"],
@@ -104,8 +117,77 @@ function ProcessosPage() {
       setOpen(false);
       void qc.invalidateQueries({ queryKey: ["processos"] });
     },
-    onError: (e: Error) => toast.error("Erro ao salvar", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
   });
+
+  const update = useMutation({
+    mutationFn: async () => {
+      if (!editingId) throw new Error("Processo inválido");
+      if (!form.client_id) throw new Error("Selecione o cliente");
+      const { error } = await supabase
+        .from("cases")
+        .update({
+          client_id: form.client_id,
+          case_number: form.case_number.trim() || null,
+          opposing_party: form.opposing_party.trim() || null,
+          court: form.court.trim() || null,
+          practice_area: form.practice_area.trim() || null,
+          action_type: form.action_type.trim() || null,
+          responsible_lawyer: form.responsible_lawyer.trim() || null,
+          notes: form.notes.trim() || null,
+        })
+        .eq("id", editingId);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Processo atualizado.");
+      setForm(EMPTY);
+      setEditingId(null);
+      setOpen(false);
+      void qc.invalidateQueries({ queryKey: ["processos"] });
+    },
+    onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase
+        .from("cases")
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Processo removido.");
+      void qc.invalidateQueries({ queryKey: ["processos"] });
+    },
+    onError: (e: Error) => toast.error("Erro ao remover", { description: friendlyError(e) }),
+  });
+
+  function openEdit(c: {
+    id: string;
+    client_id: string;
+    case_number: string | null;
+    opposing_party: string | null;
+    court: string | null;
+    practice_area: string | null;
+    action_type: string | null;
+    responsible_lawyer: string | null;
+    notes: string | null;
+  }) {
+    setEditingId(c.id);
+    setForm({
+      client_id: c.client_id,
+      case_number: c.case_number ?? "",
+      opposing_party: c.opposing_party ?? "",
+      court: c.court ?? "",
+      practice_area: c.practice_area ?? "",
+      action_type: c.action_type ?? "",
+      responsible_lawyer: c.responsible_lawyer ?? "",
+      notes: c.notes ?? "",
+    });
+    setOpen(true);
+  }
 
   const rows = (data?.cases ?? []).filter((c) => {
     const term = search.toLowerCase();
@@ -124,13 +206,29 @@ function ProcessosPage() {
         description="Processos e casos vinculados aos clientes do escritório."
         action={
           canWrite && (
-            <Dialog open={open} onOpenChange={setOpen}>
+            <Dialog
+              open={open}
+              onOpenChange={(v) => {
+                setOpen(v);
+                if (!v) {
+                  setEditingId(null);
+                  setForm(EMPTY);
+                }
+              }}
+            >
               <DialogTrigger asChild>
-                <Button>Novo processo</Button>
+                <Button
+                  onClick={() => {
+                    setEditingId(null);
+                    setForm(EMPTY);
+                  }}
+                >
+                  Novo processo
+                </Button>
               </DialogTrigger>
               <DialogContent className="max-h-[85vh] overflow-y-auto">
                 <DialogHeader>
-                  <DialogTitle>Novo processo</DialogTitle>
+                  <DialogTitle>{editingId ? "Editar processo" : "Novo processo"}</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-3">
                   <div className="space-y-2">
@@ -165,9 +263,7 @@ function ProcessosPage() {
                       <Input
                         id="rec"
                         value={form.opposing_party}
-                        onChange={(e) =>
-                          setForm({ ...form, opposing_party: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, opposing_party: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -183,9 +279,7 @@ function ProcessosPage() {
                       <Input
                         id="area"
                         value={form.practice_area}
-                        onChange={(e) =>
-                          setForm({ ...form, practice_area: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, practice_area: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -201,9 +295,7 @@ function ProcessosPage() {
                       <Input
                         id="adv"
                         value={form.responsible_lawyer}
-                        onChange={(e) =>
-                          setForm({ ...form, responsible_lawyer: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, responsible_lawyer: e.target.value })}
                       />
                     </div>
                   </div>
@@ -218,10 +310,10 @@ function ProcessosPage() {
                 </div>
                 <DialogFooter>
                   <Button
-                    onClick={() => create.mutate()}
-                    disabled={create.isPending || !form.client_id}
+                    onClick={() => (editingId ? update.mutate() : create.mutate())}
+                    disabled={create.isPending || update.isPending || !form.client_id}
                   >
-                    {create.isPending ? "Salvando…" : "Salvar"}
+                    {create.isPending || update.isPending ? "Salvando…" : "Salvar"}
                   </Button>
                 </DialogFooter>
               </DialogContent>
@@ -246,20 +338,21 @@ function ProcessosPage() {
               <th>Nº do processo</th>
               <th>Parte contrária</th>
               <th>Área</th>
-              <th className="p-3">Responsável</th>
+              <th>Responsável</th>
+              {canWrite && <th className="p-3" />}
             </tr>
           </thead>
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={5} className="p-6 text-center text-muted-foreground">
+                <td colSpan={6} className="p-6 text-center text-muted-foreground">
                   Carregando…
                 </td>
               </tr>
             )}
             {!isLoading && rows.length === 0 && (
               <tr>
-                <td colSpan={5} className="p-6 text-center text-muted-foreground">
+                <td colSpan={6} className="p-6 text-center text-muted-foreground">
                   Nenhum processo cadastrado.
                 </td>
               </tr>
@@ -272,7 +365,38 @@ function ProcessosPage() {
                 <td className="num">{c.case_number || "—"}</td>
                 <td>{c.opposing_party || "—"}</td>
                 <td>{c.practice_area || "—"}</td>
-                <td className="p-3">{c.responsible_lawyer || "—"}</td>
+                <td>{c.responsible_lawyer || "—"}</td>
+                {canWrite && (
+                  <td className="p-3 text-right whitespace-nowrap">
+                    <Button size="sm" variant="ghost" onClick={() => openEdit(c)}>
+                      Editar
+                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button size="sm" variant="ghost" className="text-destructive">
+                          Excluir
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>
+                            Excluir o processo {c.case_number || "sem número"}?
+                          </AlertDialogTitle>
+                          <AlertDialogDescription>
+                            O processo deixa de aparecer nas listas, mas acordos e recebíveis já
+                            vinculados a ele são mantidos.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                          <AlertDialogAction onClick={() => remove.mutate(c.id)}>
+                            Excluir
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>

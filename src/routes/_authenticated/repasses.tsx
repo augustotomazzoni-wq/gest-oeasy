@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
-import { Tag } from "@/components/StatusBadge";
+import { TransferStatusTag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, TRANSFER_STATUS_LABEL } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/repasses")({
@@ -65,6 +66,10 @@ function RepassesPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
+  const [payTarget, setPayTarget] = useState<{ id: string; bank_account_id: string | null } | null>(
+    null,
+  );
+  const [payBank, setPayBank] = useState("");
 
   const { data, isLoading } = useQuery({
     queryKey: ["repasses"],
@@ -107,6 +112,8 @@ function RepassesPage() {
       if (amount <= 0) throw new Error("Informe o valor do repasse");
       if (exceeds && !form.override_reason.trim())
         throw new Error("Valor acima do saldo disponível: justifique para prosseguir");
+      if (form.status === "pago" && !form.bank_account_id)
+        throw new Error("Selecione a conta de saída para marcar o repasse como pago");
 
       const { error } = await supabase.from("client_transfers").insert({
         organization_id: profile.organization_id,
@@ -139,28 +146,47 @@ function RepassesPage() {
       setOpen(false);
       void qc.invalidateQueries();
     },
-    onError: (e: Error) => toast.error("Erro ao salvar", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
   });
 
   const markPaid = useMutation({
-    mutationFn: async (id: string) => {
+    mutationFn: async ({ id, bankAccountId }: { id: string; bankAccountId: string }) => {
+      if (!profile) throw new Error("Perfil não carregado");
       const { error } = await supabase
         .from("client_transfers")
-        .update({ status: "pago", paid_on: todayISO() })
+        .update({ status: "pago", paid_on: todayISO(), bank_account_id: bankAccountId })
         .eq("id", id);
       if (error) throw error;
+
+      await supabase.from("audit_logs").insert({
+        organization_id: profile.organization_id,
+        user_id: profile.id,
+        user_email: profile.email,
+        action: "repasse_pago",
+        table_name: "client_transfers",
+        record_id: id,
+        new_values: { bank_account_id: bankAccountId },
+      });
     },
     onSuccess: () => {
       toast.success("Repasse marcado como pago.");
+      setPayTarget(null);
+      setPayBank("");
       void qc.invalidateQueries();
     },
-    onError: (e: Error) => toast.error("Erro", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro", { description: friendlyError(e) }),
   });
 
-  const pendingTotal = (data?.balances ?? []).reduce(
-    (s, b) => s + num(b.pending_transfer),
-    0,
-  );
+  function onMarkPaidClick(t: { id: string; bank_account_id: string | null }) {
+    if (t.bank_account_id) {
+      markPaid.mutate({ id: t.id, bankAccountId: t.bank_account_id });
+      return;
+    }
+    setPayTarget(t);
+    setPayBank("");
+  }
+
+  const pendingTotal = (data?.balances ?? []).reduce((s, b) => s + num(b.pending_transfer), 0);
 
   return (
     <>
@@ -236,9 +262,7 @@ function RepassesPage() {
                       id="sch"
                       type="date"
                       value={form.scheduled_for}
-                      onChange={(e) =>
-                        setForm({ ...form, scheduled_for: e.target.value })
-                      }
+                      onChange={(e) => setForm({ ...form, scheduled_for: e.target.value })}
                     />
                   </div>
                   {form.status === "pago" && (
@@ -253,7 +277,7 @@ function RepassesPage() {
                     </div>
                   )}
                   <div className="space-y-2">
-                    <Label>Conta de saída</Label>
+                    <Label>Conta de saída{form.status === "pago" ? " *" : ""}</Label>
                     <Select
                       value={form.bank_account_id}
                       onValueChange={(v) => setForm({ ...form, bank_account_id: v })}
@@ -276,22 +300,16 @@ function RepassesPage() {
                       id="dst"
                       placeholder="Chave PIX, conta do cliente…"
                       value={form.destination_info}
-                      onChange={(e) =>
-                        setForm({ ...form, destination_info: e.target.value })
-                      }
+                      onChange={(e) => setForm({ ...form, destination_info: e.target.value })}
                     />
                   </div>
                   {exceeds && (
                     <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="ovr">
-                        Justificativa (valor acima do saldo disponível)
-                      </Label>
+                      <Label htmlFor="ovr">Justificativa (valor acima do saldo disponível)</Label>
                       <Textarea
                         id="ovr"
                         value={form.override_reason}
-                        onChange={(e) =>
-                          setForm({ ...form, override_reason: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, override_reason: e.target.value })}
                       />
                     </div>
                   )}
@@ -319,9 +337,7 @@ function RepassesPage() {
       />
 
       <div className="mb-4 panel p-4">
-        <p className="text-xs text-muted-foreground uppercase">
-          Total pendente de repasse
-        </p>
+        <p className="text-xs text-muted-foreground uppercase">Total pendente de repasse</p>
         <p className="num mt-1 text-2xl font-semibold text-warning-foreground">
           {money(pendingTotal)}
         </p>
@@ -364,24 +380,16 @@ function RepassesPage() {
                   <td>{dateBR(t.scheduled_for)}</td>
                   <td>{dateBR(t.paid_on)}</td>
                   <td>
-                    <Tag
-                      tone={
-                        t.status === "pago"
-                          ? "success"
-                          : t.status === "cancelado"
-                            ? "neutral"
-                            : "warning"
-                      }
-                    >
-                      {TRANSFER_STATUS_LABEL[t.status] ?? t.status}
-                    </Tag>
+                    <TransferStatusTag status={t.status} />
                   </td>
                   <td className="p-3 text-right">
                     {canWrite && t.status !== "pago" && t.status !== "cancelado" && (
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => markPaid.mutate(t.id)}
+                        onClick={() =>
+                          onMarkPaidClick({ id: t.id, bank_account_id: t.bank_account_id })
+                        }
                       >
                         Marcar pago
                       </Button>
@@ -410,15 +418,49 @@ function RepassesPage() {
                 <tr key={b.client_id} className="border-b border-border/60 last:border-0">
                   <td className="p-3">{b.name}</td>
                   <td className="num text-right">{money(b.received_client)}</td>
-                  <td className="num p-3 text-right font-medium">
-                    {money(b.pending_transfer)}
-                  </td>
+                  <td className="num p-3 text-right font-medium">{money(b.pending_transfer)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </div>
+
+      <Dialog open={!!payTarget} onOpenChange={(v) => !v && setPayTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>De qual conta saiu o repasse?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Conta de saída</Label>
+            <Select value={payBank} onValueChange={setPayBank}>
+              <SelectTrigger>
+                <SelectValue placeholder="Selecione a conta" />
+              </SelectTrigger>
+              <SelectContent>
+                {(data?.banks ?? []).map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPayTarget(null)}>
+              Cancelar
+            </Button>
+            <Button
+              disabled={!payBank || markPaid.isPending}
+              onClick={() =>
+                payTarget && markPaid.mutate({ id: payTarget.id, bankAccountId: payBank })
+              }
+            >
+              {markPaid.isPending ? "Salvando…" : "Confirmar pagamento"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
-import { Tag } from "@/components/StatusBadge";
+import { Tag, ReceivableStatusTag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,13 +28,13 @@ import { useAuth } from "@/hooks/useAuth";
 import {
   money,
   num,
-  dateBR,
   todayISO,
   addMonthsISO,
   RECEIVABLE_TYPE_LABEL,
   RECEIVABLE_STATUS_LABEL,
   FLOW_LABEL,
 } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/acordos")({
@@ -60,6 +60,95 @@ export const Route = createFileRoute("/_authenticated/acordos")({
 
 type Step = 1 | 2 | 3 | 4;
 
+type DistributionMode = "proporcional" | "escritorio_primeiro" | "manual";
+
+type ScheduleRow = {
+  label: string;
+  number: number;
+  due_date: string;
+  gross_amount: number;
+  firm_amount: number;
+  client_amount: number;
+  cost_reimbursement: number;
+};
+
+const cents = (value: number) => Math.max(0, Math.round(num(value) * 100));
+const fromCents = (value: number) => value / 100;
+
+function allocateByCapacity(
+  capacities: number[],
+  totals: { firm: number; client: number; costs: number },
+  mode: DistributionMode,
+) {
+  let remaining = {
+    firm: cents(totals.firm),
+    client: cents(totals.client),
+    costs: cents(totals.costs),
+  };
+
+  return capacities.map((capacityValue, index) => {
+    const capacity = cents(capacityValue);
+    const totalRemaining = remaining.firm + remaining.client + remaining.costs;
+    let allocation = { firm: 0, client: 0, costs: 0 };
+
+    if (index === capacities.length - 1 || capacity >= totalRemaining) {
+      allocation = { ...remaining };
+    } else if (mode === "escritorio_primeiro") {
+      let available = capacity;
+      allocation.firm = Math.min(available, remaining.firm);
+      available -= allocation.firm;
+      allocation.costs = Math.min(available, remaining.costs);
+      available -= allocation.costs;
+      allocation.client = Math.min(available, remaining.client);
+    } else {
+      const keys = ["firm", "client", "costs"] as const;
+      const shares = keys.map((key) => {
+        const raw = totalRemaining ? (capacity * remaining[key]) / totalRemaining : 0;
+        return { key, value: Math.floor(raw), fraction: raw - Math.floor(raw) };
+      });
+      let missing = capacity - shares.reduce((sum, share) => sum + share.value, 0);
+      shares.sort((a, b) => b.fraction - a.fraction);
+      for (const share of shares) {
+        if (missing <= 0) break;
+        if (share.value < remaining[share.key]) {
+          share.value += 1;
+          missing -= 1;
+        }
+      }
+      allocation = Object.fromEntries(
+        shares.map((share) => [share.key, share.value]),
+      ) as typeof allocation;
+    }
+
+    remaining = {
+      firm: remaining.firm - allocation.firm,
+      client: remaining.client - allocation.client,
+      costs: remaining.costs - allocation.costs,
+    };
+
+    return {
+      gross_amount: fromCents(capacity),
+      firm_amount: fromCents(allocation.firm),
+      client_amount: fromCents(allocation.client),
+      cost_reimbursement: fromCents(allocation.costs),
+    };
+  });
+}
+
+function splitFirmComponents(rows: ScheduleRow[], feeTotal: number, successTotal: number) {
+  let feeRemaining = cents(feeTotal);
+  let successRemaining = cents(successTotal);
+
+  return rows.map((row) => {
+    const rowFirm = cents(row.firm_amount);
+    const fee = Math.min(rowFirm, feeRemaining);
+    feeRemaining -= fee;
+    const success = Math.min(rowFirm - fee, successRemaining);
+    successRemaining -= success;
+    return { fee_amount: fromCents(fee), success_fee_amount: fromCents(success) };
+  });
+}
+
 const EMPTY = {
   client_id: "",
   case_id: "",
@@ -80,6 +169,10 @@ const EMPTY = {
   parcels: "1",
   first_due: todayISO(),
   periodicity: "1",
+  has_entry: false,
+  entry_amount: "",
+  entry_due: todayISO(),
+  distribution_mode: "proporcional" as DistributionMode,
   no_schedule: false,
   notes: "",
 };
@@ -90,6 +183,7 @@ function AcordosPage() {
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>(1);
   const [form, setForm] = useState(EMPTY);
+  const [editedSchedule, setEditedSchedule] = useState<ScheduleRow[] | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["acordos"],
@@ -122,49 +216,127 @@ function AcordosPage() {
   });
 
   const gross = num(Number(form.gross_amount));
-  const feeFromPercent = form.fee_percent
-    ? (gross * num(Number(form.fee_percent))) / 100
-    : 0;
-  const contractualFee = form.fee_percent
-    ? feeFromPercent
-    : num(Number(form.fee_fixed_amount));
+  const feeFromPercent = form.fee_percent ? (gross * num(Number(form.fee_percent))) / 100 : 0;
+  const contractualFee = form.fee_percent ? feeFromPercent : num(Number(form.fee_fixed_amount));
   const successFee = num(Number(form.success_fee_amount));
   const costs = num(Number(form.cost_reimbursement));
   const suggestedFirm = contractualFee + successFee;
   const suggestedClient = Math.max(gross - contractualFee - costs, 0);
-  const firm = form.expected_firm_amount
-    ? num(Number(form.expected_firm_amount))
-    : suggestedFirm;
+  const firm = form.expected_firm_amount ? num(Number(form.expected_firm_amount)) : suggestedFirm;
   const client = form.expected_client_amount
     ? num(Number(form.expected_client_amount))
     : suggestedClient;
   const overridden =
     Math.abs(firm - suggestedFirm) > 0.01 || Math.abs(client - suggestedClient) > 0.01;
 
-  const schedule = useMemo(() => {
+  const generatedSchedule = useMemo<ScheduleRow[]>(() => {
     if (form.no_schedule) return [];
-    const count = Math.max(1, Math.floor(num(Number(form.parcels))));
-    const step = Math.max(1, Math.floor(num(Number(form.periodicity))));
-    const totalGross = firm + client + costs;
-    const per = Math.round((totalGross / count) * 100) / 100;
-    const rows = [];
-    let acc = 0;
-    for (let i = 0; i < count; i++) {
-      const value = i === count - 1 ? Math.round((totalGross - acc) * 100) / 100 : per;
-      acc += value;
-      const share = totalGross > 0 ? value / totalGross : 0;
-      rows.push({
-        number: i + 1,
-        due_date: addMonthsISO(form.first_due, i * step),
-        gross_amount: value,
-        fee_amount: Math.round(contractualFee * share * 100) / 100,
-        success_fee_amount: Math.round(successFee * share * 100) / 100,
-        client_amount: Math.round(client * share * 100) / 100,
-        cost_reimbursement: Math.round(costs * share * 100) / 100,
-      });
+    const scheduleTotalCents = cents(firm + client + costs);
+    if (scheduleTotalCents <= 0) return [];
+
+    const entryRequested = form.has_entry ? cents(Number(form.entry_amount)) : 0;
+    const entryCents = Math.min(entryRequested, scheduleTotalCents);
+    const remainingCents = scheduleTotalCents - entryCents;
+    const remainingCount = remainingCents ? Math.max(1, Math.floor(num(Number(form.parcels)))) : 0;
+    const period = Math.max(1, Math.floor(num(Number(form.periodicity))));
+    const capacities: number[] = [];
+    const labels: string[] = [];
+    const dueDates: string[] = [];
+
+    if (entryCents > 0) {
+      capacities.push(fromCents(entryCents));
+      labels.push("Entrada");
+      dueDates.push(form.entry_due);
     }
-    return rows;
-  }, [form, firm, client, costs, contractualFee, successFee]);
+
+    if (remainingCount > 0) {
+      const base = Math.floor(remainingCents / remainingCount);
+      let allocated = 0;
+      for (let index = 0; index < remainingCount; index += 1) {
+        const value = index === remainingCount - 1 ? remainingCents - allocated : base;
+        allocated += value;
+        capacities.push(fromCents(value));
+        labels.push(`Parcela ${index + 1}`);
+        dueDates.push(addMonthsISO(form.first_due, index * period));
+      }
+    }
+
+    const allocations = allocateByCapacity(
+      capacities,
+      { firm, client, costs },
+      form.distribution_mode,
+    );
+
+    return allocations.map((allocation, index) => ({
+      ...allocation,
+      label: labels[index] ?? `Parcela ${index + 1}`,
+      number: index + 1,
+      due_date: dueDates[index] ?? form.first_due,
+    }));
+  }, [form, firm, client, costs]);
+
+  const schedule = editedSchedule ?? generatedSchedule;
+
+  const scheduleTotals = useMemo(
+    () =>
+      schedule.reduce(
+        (total, row) => ({
+          gross: total.gross + num(row.gross_amount),
+          firm: total.firm + num(row.firm_amount),
+          client: total.client + num(row.client_amount),
+          costs: total.costs + num(row.cost_reimbursement),
+        }),
+        { gross: 0, firm: 0, client: 0, costs: 0 },
+      ),
+    [schedule],
+  );
+
+  const scheduleErrors = useMemo(() => {
+    if (form.no_schedule) return [];
+    const errors: string[] = [];
+    const expectedTotal = firm + client + costs;
+    const entry = num(Number(form.entry_amount));
+    if (form.has_entry && entry <= 0) errors.push("Informe um valor de entrada maior que zero.");
+    if (form.has_entry && entry - expectedTotal > 0.01)
+      errors.push("A entrada não pode ser maior que o total a receber.");
+    if (!schedule.length) errors.push("Crie ao menos uma parcela para o cronograma.");
+
+    schedule.forEach((row, index) => {
+      const parts = row.firm_amount + row.client_amount + row.cost_reimbursement;
+      if (!row.due_date) errors.push(`${row.label || `Parcela ${index + 1}`}: informe a data.`);
+      if (row.gross_amount <= 0)
+        errors.push(`${row.label || `Parcela ${index + 1}`}: informe um valor maior que zero.`);
+      if (Math.abs(row.gross_amount - parts) > 0.01)
+        errors.push(`${row.label || `Parcela ${index + 1}`}: a divisão não fecha com o total.`);
+    });
+
+    if (Math.abs(scheduleTotals.gross - expectedTotal) > 0.01)
+      errors.push("A soma das parcelas não fecha com o total a receber.");
+    if (Math.abs(scheduleTotals.firm - firm) > 0.01)
+      errors.push("A soma destinada ao escritório não fecha com o valor esperado.");
+    if (Math.abs(scheduleTotals.client - client) > 0.01)
+      errors.push("A soma destinada ao cliente não fecha com o valor esperado.");
+    if (Math.abs(scheduleTotals.costs - costs) > 0.01)
+      errors.push("A soma dos reembolsos não fecha com o valor esperado.");
+    return [...new Set(errors)];
+  }, [
+    client,
+    costs,
+    firm,
+    form.entry_amount,
+    form.has_entry,
+    form.no_schedule,
+    schedule,
+    scheduleTotals,
+  ]);
+
+  function updateScheduleRow(index: number, patch: Partial<ScheduleRow>) {
+    setEditedSchedule((current) =>
+      (current ?? generatedSchedule).map((row, rowIndex) =>
+        rowIndex === index ? { ...row, ...patch } : row,
+      ),
+    );
+  }
 
   const create = useMutation({
     mutationFn: async () => {
@@ -172,78 +344,70 @@ function AcordosPage() {
       if (!form.client_id) throw new Error("Selecione o cliente");
       if (overridden && !form.override_reason.trim())
         throw new Error("Justifique a alteração manual dos valores calculados");
+      if (scheduleErrors.length) throw new Error(scheduleErrors[0]);
 
-      const { data: created, error } = await supabase
-        .from("legal_receivables")
-        .insert({
-          organization_id: profile.organization_id,
-          created_by: profile.id,
-          client_id: form.client_id,
-          case_id: form.case_id || null,
-          type: form.type as never,
-          status: form.status as never,
-          description: form.description.trim() || null,
-          notes: form.notes.trim() || null,
-          gross_amount: gross,
-          fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : null,
-          fee_fixed_amount: form.fee_fixed_amount
-            ? num(Number(form.fee_fixed_amount))
-            : null,
-          success_fee_amount: successFee,
-          cost_reimbursement: costs,
-          expected_firm_amount: firm,
-          expected_client_amount: client,
-          agreement_date: form.agreement_date || null,
-          flow: form.flow as never,
-          is_estimated: form.is_estimated,
-          manual_override_reason: overridden ? form.override_reason.trim() : null,
-        })
-        .select("id")
-        .single();
-      if (error) throw error;
+      const successForSchedule = Math.min(successFee, firm);
+      const feeForSchedule = Math.max(firm - successForSchedule, 0);
+      const firmComponents = schedule.length
+        ? splitFirmComponents(schedule, feeForSchedule, successForSchedule)
+        : [];
 
-      if (schedule.length) {
-        const { error: e2 } = await supabase.from("installments").insert(
-          schedule.map((s) => ({
-            organization_id: profile.organization_id,
-            created_by: profile.id,
-            receivable_id: created.id,
-            number: s.number,
-            total_count: schedule.length,
-            due_date: s.due_date,
-            gross_amount: s.gross_amount,
-            fee_amount: s.fee_amount,
-            success_fee_amount: s.success_fee_amount,
-            client_amount: s.client_amount,
-            cost_reimbursement: s.cost_reimbursement,
-          })),
-        );
-        if (e2) throw e2;
-      }
-
-      await supabase.from("audit_logs").insert({
-        organization_id: profile.organization_id,
-        user_id: profile.id,
-        user_email: profile.email,
-        action: "criar_recebivel",
-        table_name: "legal_receivables",
-        record_id: created.id,
-        new_values: { firm, client, gross, parcelas: schedule.length },
+      // Acordo e cronograma são gravados em uma única transação no banco:
+      // se a criação das parcelas falhar, o acordo também não é criado —
+      // evita um acordo "fantasma" sem nenhuma parcela.
+      const { error } = await supabase.rpc("create_agreement_with_schedule", {
+        _client_id: form.client_id,
+        _case_id: form.case_id || null,
+        _type: form.type,
+        _status: form.status,
+        _description: form.description.trim() || null,
+        _notes: form.notes.trim() || null,
+        _gross_amount: gross,
+        _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : null,
+        _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : null,
+        _success_fee_amount: successFee,
+        _cost_reimbursement: costs,
+        _expected_firm_amount: firm,
+        _expected_client_amount: client,
+        _agreement_date: form.agreement_date || null,
+        _flow: form.flow,
+        _is_estimated: form.is_estimated,
+        _manual_override_reason: overridden ? form.override_reason.trim() : null,
+        _installments: schedule.map((s, index) => ({
+          label: s.label,
+          number: s.number,
+          total_count: schedule.length,
+          due_date: s.due_date,
+          gross_amount: s.gross_amount,
+          fee_amount: firmComponents[index]?.fee_amount ?? 0,
+          success_fee_amount: firmComponents[index]?.success_fee_amount ?? 0,
+          client_amount: s.client_amount,
+          cost_reimbursement: s.cost_reimbursement,
+        })),
       });
+      if (error) throw error;
     },
     onSuccess: () => {
       toast.success("Acordo registrado com o cronograma.");
       setForm(EMPTY);
+      setEditedSchedule(null);
       setStep(1);
       setOpen(false);
       void qc.invalidateQueries();
     },
-    onError: (e: Error) => toast.error("Erro ao salvar", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
   });
 
-  const casesForClient = (data?.cases ?? []).filter(
-    (c) => c.client_id === form.client_id,
-  );
+  const casesForClient = (data?.cases ?? []).filter((c) => c.client_id === form.client_id);
+
+  const stepValid =
+    step === 1
+      ? !!form.client_id
+      : step === 2
+        ? gross > 0
+        : step === 3
+          ? form.no_schedule || scheduleErrors.length === 0
+          : true;
 
   return (
     <>
@@ -256,7 +420,10 @@ function AcordosPage() {
               open={open}
               onOpenChange={(v) => {
                 setOpen(v);
-                if (!v) setStep(1);
+                if (!v) {
+                  setStep(1);
+                  setEditedSchedule(null);
+                }
               }}
             >
               <DialogTrigger asChild>
@@ -273,9 +440,7 @@ function AcordosPage() {
                       <Label>Cliente</Label>
                       <Select
                         value={form.client_id}
-                        onValueChange={(v) =>
-                          setForm({ ...form, client_id: v, case_id: "" })
-                        }
+                        onValueChange={(v) => setForm({ ...form, client_id: v, case_id: "" })}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Selecione o cliente" />
@@ -312,9 +477,7 @@ function AcordosPage() {
                       <Input
                         id="desc"
                         value={form.description}
-                        onChange={(e) =>
-                          setForm({ ...form, description: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, description: e.target.value })}
                       />
                     </div>
                   </div>
@@ -366,10 +529,11 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.gross_amount}
-                        onChange={(e) =>
-                          setForm({ ...form, gross_amount: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, gross_amount: e.target.value })}
                       />
+                      {gross <= 0 && (
+                        <p className="text-xs text-destructive">Informe um valor maior que zero.</p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="date">Data do acordo/decisão</Label>
@@ -377,9 +541,7 @@ function AcordosPage() {
                         id="date"
                         type="date"
                         value={form.agreement_date}
-                        onChange={(e) =>
-                          setForm({ ...form, agreement_date: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, agreement_date: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -401,9 +563,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.fee_fixed_amount}
-                        onChange={(e) =>
-                          setForm({ ...form, fee_fixed_amount: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, fee_fixed_amount: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -414,9 +574,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.success_fee_amount}
-                        onChange={(e) =>
-                          setForm({ ...form, success_fee_amount: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, success_fee_amount: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -427,9 +585,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.cost_reimbursement}
-                        onChange={(e) =>
-                          setForm({ ...form, cost_reimbursement: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, cost_reimbursement: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -453,9 +609,7 @@ function AcordosPage() {
                     <label className="flex items-center gap-2 self-end pb-2 text-sm">
                       <Checkbox
                         checked={form.is_estimated}
-                        onCheckedChange={(v) =>
-                          setForm({ ...form, is_estimated: v === true })
-                        }
+                        onCheckedChange={(v) => setForm({ ...form, is_estimated: v === true })}
                       />
                       Valor estimado (a confirmar)
                     </label>
@@ -504,56 +658,127 @@ function AcordosPage() {
                         <Textarea
                           id="just"
                           value={form.override_reason}
-                          onChange={(e) =>
-                            setForm({ ...form, override_reason: e.target.value })
-                          }
+                          onChange={(e) => setForm({ ...form, override_reason: e.target.value })}
                         />
                       </div>
                     )}
                     <label className="flex items-center gap-2 text-sm">
                       <Checkbox
                         checked={form.no_schedule}
-                        onCheckedChange={(v) =>
-                          setForm({ ...form, no_schedule: v === true })
-                        }
+                        onCheckedChange={(v) => setForm({ ...form, no_schedule: v === true })}
                       />
                       Ainda sem cronograma definido (a definir)
                     </label>
                     {!form.no_schedule && (
-                      <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="space-y-4">
                         <div className="space-y-2">
-                          <Label htmlFor="par">Nº de parcelas</Label>
-                          <Input
-                            id="par"
-                            type="number"
-                            min="1"
-                            value={form.parcels}
-                            onChange={(e) => setForm({ ...form, parcels: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="fst">1º vencimento</Label>
-                          <Input
-                            id="fst"
-                            type="date"
-                            value={form.first_due}
-                            onChange={(e) =>
-                              setForm({ ...form, first_due: e.target.value })
+                          <Label>Como distribuir os valores nas parcelas?</Label>
+                          <Select
+                            value={form.distribution_mode}
+                            onValueChange={(v) =>
+                              setForm({
+                                ...form,
+                                distribution_mode: v as DistributionMode,
+                              })
                             }
-                          />
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="proporcional">
+                                Proporcional entre escritório e cliente
+                              </SelectItem>
+                              <SelectItem value="escritorio_primeiro">
+                                Primeiros valores para o escritório
+                              </SelectItem>
+                              <SelectItem value="manual">Personalizado manualmente</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-muted-foreground">
+                            A sugestão poderá ser alterada parcela por parcela na próxima etapa.
+                          </p>
                         </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="per">Periodicidade (meses)</Label>
-                          <Input
-                            id="per"
-                            type="number"
-                            min="1"
-                            value={form.periodicity}
-                            onChange={(e) =>
-                              setForm({ ...form, periodicity: e.target.value })
-                            }
+
+                        <label className="flex items-center gap-2 text-sm">
+                          <Checkbox
+                            checked={form.has_entry}
+                            onCheckedChange={(v) => setForm({ ...form, has_entry: v === true })}
                           />
+                          O acordo possui entrada
+                        </label>
+
+                        {form.has_entry && (
+                          <div className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-2">
+                            <div className="space-y-2">
+                              <Label htmlFor="entry-value">Valor da entrada</Label>
+                              <Input
+                                id="entry-value"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={form.entry_amount}
+                                onChange={(e) => setForm({ ...form, entry_amount: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="entry-date">Data da entrada</Label>
+                              <Input
+                                id="entry-date"
+                                type="date"
+                                value={form.entry_due}
+                                onChange={(e) => setForm({ ...form, entry_due: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div className="space-y-2">
+                            <Label htmlFor="par">
+                              {form.has_entry ? "Parcelas após a entrada" : "Nº de parcelas"}
+                            </Label>
+                            <Input
+                              id="par"
+                              type="number"
+                              min="1"
+                              value={form.parcels}
+                              onChange={(e) => setForm({ ...form, parcels: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="fst">1º vencimento do saldo</Label>
+                            <Input
+                              id="fst"
+                              type="date"
+                              value={form.first_due}
+                              onChange={(e) => setForm({ ...form, first_due: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="per">Periodicidade (meses)</Label>
+                            <Input
+                              id="per"
+                              type="number"
+                              min="1"
+                              value={form.periodicity}
+                              onChange={(e) => setForm({ ...form, periodicity: e.target.value })}
+                            />
+                          </div>
                         </div>
+                      </div>
+                    )}
+
+                    {scheduleErrors.length > 0 && (
+                      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3">
+                        <p className="text-sm font-medium text-destructive">
+                          Corrija antes de continuar:
+                        </p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-destructive">
+                          {scheduleErrors.map((error) => (
+                            <li key={error}>{error}</li>
+                          ))}
+                        </ul>
                       </div>
                     )}
                   </div>
@@ -563,36 +788,147 @@ function AcordosPage() {
                   <div className="space-y-4">
                     <div className="panel p-4 text-sm">
                       <div className="grid gap-2 sm:grid-cols-2">
-                        <p>Valor bruto: <strong className="num">{money(gross)}</strong></p>
-                        <p>Honorários contratuais: <strong className="num">{money(contractualFee)}</strong></p>
-                        <p>Sucumbência: <strong className="num">{money(successFee)}</strong></p>
-                        <p>Custos: <strong className="num">{money(costs)}</strong></p>
-                        <p>Total do escritório: <strong className="num">{money(firm)}</strong></p>
-                        <p>Total do cliente: <strong className="num">{money(client)}</strong></p>
+                        <p>
+                          Total a receber:{" "}
+                          <strong className="num">{money(firm + client + costs)}</strong>
+                        </p>
+                        <p>
+                          Distribuído:{" "}
+                          <strong className="num">{money(scheduleTotals.gross)}</strong>
+                        </p>
+                        <p>
+                          Escritório: <strong className="num">{money(scheduleTotals.firm)}</strong>
+                          <span className="text-muted-foreground"> de {money(firm)}</span>
+                        </p>
+                        <p>
+                          Cliente: <strong className="num">{money(scheduleTotals.client)}</strong>
+                          <span className="text-muted-foreground"> de {money(client)}</span>
+                        </p>
+                        <p>
+                          Reembolsos: <strong className="num">{money(scheduleTotals.costs)}</strong>
+                          <span className="text-muted-foreground"> de {money(costs)}</span>
+                        </p>
+                        <p>
+                          Itens do cronograma: <strong>{schedule.length}</strong>
+                        </p>
                       </div>
-                      <p className="mt-3 text-xs text-muted-foreground">
-                        Soma do cronograma: {money(schedule.reduce((s, r) => s + r.gross_amount, 0))}
-                      </p>
                     </div>
+
+                    {!form.no_schedule && (
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium">Composição de cada parcela</p>
+                          <p className="text-xs text-muted-foreground">
+                            Altere as datas e indique exatamente quanto é do escritório e do
+                            cliente.
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            setEditedSchedule(generatedSchedule.map((row) => ({ ...row })))
+                          }
+                        >
+                          Regerar sugestão
+                        </Button>
+                      </div>
+                    )}
+
                     {schedule.length > 0 && (
-                      <div className="max-h-52 overflow-y-auto rounded-md border border-border">
-                        <table className="w-full text-sm">
+                      <div className="max-h-80 overflow-auto rounded-md border border-border">
+                        <table className="min-w-[860px] w-full text-sm">
                           <thead className="bg-muted text-xs text-muted-foreground uppercase">
                             <tr>
-                              <th className="p-2 text-left">#</th>
+                              <th className="p-2 text-left">Identificação</th>
                               <th className="text-left">Vencimento</th>
-                              <th className="text-right">Valor</th>
-                              <th className="p-2 text-right">Cliente</th>
+                              <th className="text-right">Total</th>
+                              <th className="text-right">Escritório</th>
+                              <th className="text-right">Cliente</th>
+                              <th className="p-2 text-right">Reembolso</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {schedule.map((s) => (
-                              <tr key={s.number} className="border-t border-border/60">
-                                <td className="p-2">{s.number}</td>
-                                <td>{dateBR(s.due_date)}</td>
-                                <td className="num text-right">{money(s.gross_amount)}</td>
-                                <td className="num p-2 text-right">
-                                  {money(s.client_amount)}
+                            {schedule.map((row, index) => (
+                              <tr
+                                key={`${row.number}-${index}`}
+                                className="border-t border-border/60"
+                              >
+                                <td className="p-2">
+                                  <Input
+                                    className="min-w-28"
+                                    value={row.label}
+                                    onChange={(e) =>
+                                      updateScheduleRow(index, { label: e.target.value })
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    className="min-w-36"
+                                    type="date"
+                                    value={row.due_date}
+                                    onChange={(e) =>
+                                      updateScheduleRow(index, { due_date: e.target.value })
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    className="min-w-28 text-right"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={row.gross_amount}
+                                    onChange={(e) =>
+                                      updateScheduleRow(index, {
+                                        gross_amount: num(Number(e.target.value)),
+                                      })
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    className="min-w-28 text-right"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={row.firm_amount}
+                                    onChange={(e) =>
+                                      updateScheduleRow(index, {
+                                        firm_amount: num(Number(e.target.value)),
+                                      })
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    className="min-w-28 text-right"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={row.client_amount}
+                                    onChange={(e) =>
+                                      updateScheduleRow(index, {
+                                        client_amount: num(Number(e.target.value)),
+                                      })
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    className="min-w-28 text-right"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={row.cost_reimbursement}
+                                    onChange={(e) =>
+                                      updateScheduleRow(index, {
+                                        cost_reimbursement: num(Number(e.target.value)),
+                                      })
+                                    }
+                                  />
                                 </td>
                               </tr>
                             ))}
@@ -600,29 +936,43 @@ function AcordosPage() {
                         </table>
                       </div>
                     )}
+
+                    {scheduleErrors.length > 0 && (
+                      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3">
+                        <p className="text-sm font-medium text-destructive">
+                          Corrija o cronograma antes de confirmar:
+                        </p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-destructive">
+                          {scheduleErrors.map((error) => (
+                            <li key={error}>{error}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 )}
 
                 <DialogFooter className="gap-2">
                   {step > 1 && (
-                    <Button
-                      variant="outline"
-                      onClick={() => setStep((s) => (s - 1) as Step)}
-                    >
+                    <Button variant="outline" onClick={() => setStep((s) => (s - 1) as Step)}>
                       Voltar
                     </Button>
                   )}
                   {step < 4 ? (
                     <Button
-                      onClick={() => setStep((s) => (s + 1) as Step)}
-                      disabled={step === 1 && !form.client_id}
+                      onClick={() => {
+                        if (step === 3)
+                          setEditedSchedule(generatedSchedule.map((row) => ({ ...row })));
+                        setStep((s) => (s + 1) as Step);
+                      }}
+                      disabled={!stepValid}
                     >
                       Continuar
                     </Button>
                   ) : (
                     <Button
                       onClick={() => create.mutate()}
-                      disabled={create.isPending}
+                      disabled={create.isPending || scheduleErrors.length > 0}
                     >
                       {create.isPending ? "Salvando…" : "Confirmar"}
                     </Button>
@@ -673,17 +1023,13 @@ function AcordosPage() {
                       {(r.clients as { name: string } | null)?.name ?? "—"}
                     </span>
                     {r.description && (
-                      <span className="block text-xs text-muted-foreground">
-                        {r.description}
-                      </span>
+                      <span className="block text-xs text-muted-foreground">{r.description}</span>
                     )}
                   </td>
                   <td>{RECEIVABLE_TYPE_LABEL[r.type] ?? r.type}</td>
                   <td>
                     <div className="flex flex-wrap gap-1">
-                      <Tag tone={r.status === "confirmado" ? "success" : "neutral"}>
-                        {RECEIVABLE_STATUS_LABEL[r.status] ?? r.status}
-                      </Tag>
+                      <ReceivableStatusTag status={r.status} />
                       {r.is_estimated && <Tag tone="warning">Estimado</Tag>}
                     </div>
                   </td>

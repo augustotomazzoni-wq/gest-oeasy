@@ -8,11 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/useAuth";
 import { money, dateBR, num } from "@/lib/format";
-import {
-  parseWorkbook,
-  matchKey,
-  type ParsedWorkbook,
-} from "@/lib/import-xlsx";
+import { friendlyError } from "@/lib/errors";
+import { parseWorkbook, matchKey, type ParsedWorkbook } from "@/lib/import-xlsx";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/importar")({
@@ -71,9 +68,7 @@ function ImportarPage() {
         .from("clients")
         .select("id, name")
         .is("deleted_at", null);
-      const clientIds = new Map(
-        (existing ?? []).map((c) => [matchKey(c.name), c.id] as const),
-      );
+      const clientIds = new Map((existing ?? []).map((c) => [matchKey(c.name), c.id] as const));
 
       for (const c of parsed.clients) {
         const key = matchKey(c.name);
@@ -89,9 +84,24 @@ function ImportarPage() {
             })
             .select("id")
             .single();
-          if (error) throw new Error(`Cliente ${c.name}: ${error.message}`);
+          if (error) throw new Error(`Cliente ${c.name}: ${friendlyError(error)}`);
           clientId = data.id;
           clientIds.set(key, clientId);
+        }
+
+        // Se uma importação anterior falhou no meio do caminho, este cliente
+        // pode já ter um acordo importado — pula para não duplicar parcelas
+        // e recebimentos ao confirmar de novo.
+        const { data: alreadyImported } = await supabase
+          .from("legal_receivables")
+          .select("id")
+          .eq("client_id", clientId)
+          .eq("description", "Importado da planilha de controle")
+          .is("deleted_at", null)
+          .maybeSingle();
+        if (alreadyImported) {
+          messages.push(`${c.name}: já importado anteriormente — pulado para evitar duplicidade.`);
+          continue;
         }
 
         let caseId: string | null = null;
@@ -116,15 +126,13 @@ function ImportarPage() {
               })
               .select("id")
               .single();
-            if (error) throw new Error(`Processo de ${c.name}: ${error.message}`);
+            if (error) throw new Error(`Processo de ${c.name}: ${friendlyError(error)}`);
             caseId = data.id;
           }
         }
 
         const gross = c.gross_amount ?? c.firm_amount;
-        const clientShare = c.gross_amount
-          ? Math.max(c.gross_amount - c.firm_amount, 0)
-          : 0;
+        const clientShare = c.gross_amount ? Math.max(c.gross_amount - c.firm_amount, 0) : 0;
 
         const { data: recv, error: rErr } = await supabase
           .from("legal_receivables")
@@ -145,7 +153,7 @@ function ImportarPage() {
           })
           .select("id")
           .single();
-        if (rErr) throw new Error(`Acordo de ${c.name}: ${rErr.message}`);
+        if (rErr) throw new Error(`Acordo de ${c.name}: ${friendlyError(rErr)}`);
 
         const rows = parsed.installments.filter((i) => matchKey(i.client) === key);
         const list = rows.length
@@ -183,7 +191,7 @@ function ImportarPage() {
             })
             .select("id")
             .single();
-          if (iErr) throw new Error(`Parcela de ${c.name}: ${iErr.message}`);
+          if (iErr) throw new Error(`Parcela de ${c.name}: ${friendlyError(iErr)}`);
 
           if (p.paid && p.firm_amount > 0) {
             const { error: pErr } = await supabase.from("receipts").insert({
@@ -196,13 +204,11 @@ function ImportarPage() {
               client_amount: 0,
               notes: "Importado da planilha",
             });
-            if (pErr) throw new Error(`Recebimento de ${c.name}: ${pErr.message}`);
+            if (pErr) throw new Error(`Recebimento de ${c.name}: ${friendlyError(pErr)}`);
           }
         }
 
-        messages.push(
-          `${c.name}: acordo importado com ${list.length} parcela(s).`,
-        );
+        messages.push(`${c.name}: acordo importado com ${list.length} parcela(s).`);
       }
 
       await supabase.from("audit_logs").insert({
@@ -228,14 +234,11 @@ function ImportarPage() {
       void qc.invalidateQueries();
     },
     onError: (e: Error) =>
-      toast.error("Importação interrompida", { description: e.message }),
+      toast.error("Importação interrompida", { description: friendlyError(e) }),
   });
 
   const totalFirm = (parsed?.clients ?? []).reduce((s, c) => s + num(c.firm_amount), 0);
-  const totalReceived = (parsed?.clients ?? []).reduce(
-    (s, c) => s + num(c.already_received),
-    0,
-  );
+  const totalReceived = (parsed?.clients ?? []).reduce((s, c) => s + num(c.already_received), 0);
 
   return (
     <>
@@ -256,8 +259,8 @@ function ImportarPage() {
           }}
         />
         <p className="mt-2 text-xs text-muted-foreground">
-          Formato esperado: aba "Clientes" e aba "Parcelas a Receber", com os mesmos
-          cabeçalhos da planilha atual. Nada é gravado até você confirmar.
+          Formato esperado: aba "Clientes" e aba "Parcelas a Receber", com os mesmos cabeçalhos da
+          planilha atual. Nada é gravado até você confirmar.
         </p>
       </div>
 
@@ -270,9 +273,7 @@ function ImportarPage() {
             </div>
             <div className="panel p-4">
               <p className="text-xs text-muted-foreground uppercase">Parcelas</p>
-              <p className="num mt-1 text-2xl font-semibold">
-                {parsed.installments.length}
-              </p>
+              <p className="num mt-1 text-2xl font-semibold">{parsed.installments.length}</p>
             </div>
             <div className="panel p-4">
               <p className="text-xs text-muted-foreground uppercase">Total do escritório</p>
@@ -280,9 +281,7 @@ function ImportarPage() {
             </div>
             <div className="panel p-4">
               <p className="text-xs text-muted-foreground uppercase">Já recebido</p>
-              <p className="num mt-1 text-2xl font-semibold text-success">
-                {money(totalReceived)}
-              </p>
+              <p className="num mt-1 text-2xl font-semibold text-success">{money(totalReceived)}</p>
             </div>
           </div>
 
@@ -299,9 +298,7 @@ function ImportarPage() {
 
           <div className="panel mb-4 overflow-x-auto">
             <div className="border-b border-border p-3">
-              <h2 className="font-display text-sm font-semibold">
-                Prévia — clientes e acordos
-              </h2>
+              <h2 className="font-display text-sm font-semibold">Prévia — clientes e acordos</h2>
             </div>
             <table className="w-full text-sm">
               <thead>
@@ -320,9 +317,7 @@ function ImportarPage() {
                     <td className="p-3">
                       <span className="font-medium">{c.name}</span>
                       {c.case_number && (
-                        <span className="block text-xs text-muted-foreground">
-                          {c.case_number}
-                        </span>
+                        <span className="block text-xs text-muted-foreground">{c.case_number}</span>
                       )}
                     </td>
                     <td>{c.type}</td>

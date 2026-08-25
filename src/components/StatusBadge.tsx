@@ -1,4 +1,8 @@
-import { INSTALLMENT_STATUS_LABEL } from "@/lib/format";
+import {
+  INSTALLMENT_STATUS_LABEL,
+  RECEIVABLE_STATUS_LABEL,
+  TRANSFER_STATUS_LABEL,
+} from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const TONE: Record<string, string> = {
@@ -22,6 +26,43 @@ export function StatusBadge({ status }: { status: string }) {
       {INSTALLMENT_STATUS_LABEL[status] ?? status}
     </span>
   );
+}
+
+type Tone = "neutral" | "success" | "warning" | "danger" | "info";
+
+// Uma única tabela cor↔status por domínio, para que "confirmado", "pago" etc.
+// tenham sempre a mesma cor em qualquer tela do sistema.
+const RECEIVABLE_TONE: Record<string, Tone> = {
+  rascunho: "neutral",
+  estimado: "warning",
+  confirmado: "success",
+  em_pagamento: "info",
+  em_execucao: "info",
+  encerrado: "neutral",
+  cancelado: "danger",
+};
+
+const TRANSFER_TONE: Record<string, Tone> = {
+  pendente: "warning",
+  agendado: "info",
+  pago: "success",
+  cancelado: "neutral",
+};
+
+export function receivableStatusTone(status: string): Tone {
+  return RECEIVABLE_TONE[status] ?? "neutral";
+}
+
+export function transferStatusTone(status: string): Tone {
+  return TRANSFER_TONE[status] ?? "neutral";
+}
+
+export function ReceivableStatusTag({ status }: { status: string }) {
+  return <Tag tone={receivableStatusTone(status)}>{RECEIVABLE_STATUS_LABEL[status] ?? status}</Tag>;
+}
+
+export function TransferStatusTag({ status }: { status: string }) {
+  return <Tag tone={transferStatusTone(status)}>{TRANSFER_STATUS_LABEL[status] ?? status}</Tag>;
 }
 
 export function Tag({

@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, TX_TYPE_LABEL } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/caixa")({
@@ -61,7 +62,9 @@ const EMPTY = {
 const THIRD_PARTY = new Set(["entrada_de_terceiros", "repasse_de_terceiros"]);
 
 function CaixaPage() {
-  const { profile, canWrite } = useAuth();
+  const { profile, canWrite, roles } = useAuth();
+  // O Lançador Financeiro também pode registrar entradas e saídas de caixa.
+  const canLaunch = canWrite || roles.includes("lancador");
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
@@ -81,11 +84,7 @@ function CaixaPage() {
           .lt("paid_on", end)
           .order("paid_on", { ascending: false }),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
-        supabase
-          .from("categories")
-          .select("id, name, type")
-          .eq("active", true)
-          .order("name"),
+        supabase.from("categories").select("id, name, type").eq("active", true).order("name"),
         supabase.from("v_bank_balances").select("*"),
       ]);
       if (tx.error) throw tx.error;
@@ -120,6 +119,7 @@ function CaixaPage() {
       if (!form.description.trim()) throw new Error("Informe a descrição");
       const amount = num(Number(form.amount));
       if (amount <= 0) throw new Error("Informe um valor válido");
+      if (!form.bank_account_id) throw new Error("Selecione a conta bancária");
       const { error } = await supabase.from("financial_transactions").insert({
         organization_id: profile.organization_id,
         created_by: profile.id,
@@ -140,7 +140,7 @@ function CaixaPage() {
       setOpen(false);
       void qc.invalidateQueries();
     },
-    onError: (e: Error) => toast.error("Erro ao salvar", { description: e.message }),
+    onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
   });
 
   return (
@@ -149,7 +149,7 @@ function CaixaPage() {
         title="Fluxo de Caixa"
         description="Movimentações do escritório separadas dos valores de terceiros."
         action={
-          canWrite && (
+          canLaunch && (
             <Dialog open={open} onOpenChange={setOpen}>
               <DialogTrigger asChild>
                 <Button>Novo lançamento</Button>
@@ -161,10 +161,7 @@ function CaixaPage() {
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label>Tipo</Label>
-                    <Select
-                      value={form.type}
-                      onValueChange={(v) => setForm({ ...form, type: v })}
-                    >
+                    <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
@@ -202,13 +199,13 @@ function CaixaPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Conta</Label>
+                    <Label>Conta *</Label>
                     <Select
                       value={form.bank_account_id}
                       onValueChange={(v) => setForm({ ...form, bank_account_id: v })}
                     >
                       <SelectTrigger>
-                        <SelectValue placeholder="Selecione" />
+                        <SelectValue placeholder="Selecione a conta" />
                       </SelectTrigger>
                       <SelectContent>
                         {(data?.banks ?? []).map((b) => (
@@ -231,9 +228,7 @@ function CaixaPage() {
                       <SelectContent>
                         {(data?.categories ?? [])
                           .filter((c) =>
-                            form.type === "entrada"
-                              ? c.type === "receita"
-                              : c.type === "despesa",
+                            form.type === "entrada" ? c.type === "receita" : c.type === "despesa",
                           )
                           .map((c) => (
                             <SelectItem key={c.id} value={c.id}>
@@ -286,18 +281,14 @@ function CaixaPage() {
         </div>
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">Despesas</p>
-          <p className="num mt-1 text-xl font-semibold text-destructive">
-            {money(totals.out)}
-          </p>
+          <p className="num mt-1 text-xl font-semibold text-destructive">{money(totals.out)}</p>
         </div>
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">Resultado do mês</p>
           <p className="num mt-1 text-xl font-semibold">{money(totals.in - totals.out)}</p>
         </div>
         <div className="panel p-4">
-          <p className="text-xs text-muted-foreground uppercase">
-            Terceiros (entrada / repasse)
-          </p>
+          <p className="text-xs text-muted-foreground uppercase">Terceiros (entrada / repasse)</p>
           <p className="num mt-1 text-xl font-semibold">
             {money(totals.thirdIn)} / {money(totals.thirdOut)}
           </p>
@@ -370,10 +361,7 @@ function CaixaPage() {
           <table className="w-full text-sm">
             <tbody>
               {(data?.balances ?? []).map((b) => (
-                <tr
-                  key={b.bank_account_id}
-                  className="border-b border-border/60 last:border-0"
-                >
+                <tr key={b.bank_account_id} className="border-b border-border/60 last:border-0">
                   <td className="p-3">{b.name}</td>
                   <td className="num p-3 text-right font-medium">{money(b.balance)}</td>
                 </tr>

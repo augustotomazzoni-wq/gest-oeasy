@@ -17,6 +17,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { money, num, dateBR, todayISO, daysBetween } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -84,24 +85,26 @@ function useDashboardData() {
   });
 }
 
+type DashboardLink = "/caixa" | "/repasses" | "/parcelas" | "/acordos";
+
 function Card({
   label,
   value,
   hint,
   tone = "default",
   to,
+  search,
 }: {
   label: string;
   value: string;
   hint?: string;
   tone?: "default" | "danger" | "success";
-  to?: string;
+  to?: DashboardLink;
+  search?: { filtro?: string };
 }) {
   const body = (
     <div className="panel h-full p-4">
-      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-        {label}
-      </p>
+      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{label}</p>
       <p
         className={`num mt-2 font-display text-2xl font-semibold ${
           tone === "danger" ? "text-destructive" : tone === "success" ? "text-success" : ""
@@ -113,7 +116,11 @@ function Card({
     </div>
   );
   return to ? (
-    <Link to={to} className="block transition-opacity hover:opacity-80">
+    <Link
+      to={to}
+      {...(search ? { search } : {})}
+      className="block transition-opacity hover:opacity-80"
+    >
       {body}
     </Link>
   ) : (
@@ -131,7 +138,7 @@ function Dashboard() {
   if (error) {
     return (
       <p className="text-sm text-destructive">
-        Não foi possível carregar os indicadores: {(error as Error).message}
+        Não foi possível carregar os indicadores: {friendlyError(error)}
       </p>
     );
   }
@@ -147,14 +154,19 @@ function Dashboard() {
     .filter((t) => t.type === "saida")
     .reduce((s, t) => s + num(t.amount as number), 0);
   const transferred = d.balances.reduce((s, b) => s + num(b.transferred as number), 0);
-  const pendingTransfer = d.balances.reduce(
-    (s, b) => s + num(b.pending_transfer as number),
-    0,
-  );
+  const pendingTransfer = d.balances.reduce((s, b) => s + num(b.pending_transfer as number), 0);
 
   const openFirmExpected = d.installments
     .filter((i) => i.status !== "PAGA" && i.status !== "CANCELADA")
-    .reduce((s, i) => s + num(i.fee_amount) + num(i.success_fee_amount) - num(i.paid_fee) - num(i.paid_success_fee), 0);
+    .reduce(
+      (s, i) =>
+        s +
+        num(i.fee_amount) +
+        num(i.success_fee_amount) -
+        num(i.paid_fee) -
+        num(i.paid_success_fee),
+      0,
+    );
   const estimated = d.receivables
     .filter((r) => r.is_estimated)
     .reduce((s, r) => s + num(r.expected_firm_amount as number), 0);
@@ -175,8 +187,7 @@ function Dashboard() {
       daysBetween(today, i.due_date) <= 30,
   );
 
-  const sumBalance = (rows: InstallmentRow[]) =>
-    rows.reduce((s, i) => s + num(i.balance), 0);
+  const sumBalance = (rows: InstallmentRow[]) => rows.reduce((s, i) => s + num(i.balance), 0);
 
   // Envelhecimento dos atrasos
   const aging = [
@@ -218,11 +229,12 @@ function Dashboard() {
     "var(--color-chart-5)",
   ];
 
-  const alerts: { text: string; to: string }[] = [];
+  const alerts: { text: string; to: DashboardLink; search?: { filtro?: string } }[] = [];
   if (late.length)
     alerts.push({
       text: `${late.length} parcela(s) atrasada(s), somando ${money(sumBalance(late))}`,
       to: "/parcelas",
+      search: { filtro: "ATRASADA" },
     });
   if (pendingTransfer > 0.01)
     alerts.push({
@@ -285,9 +297,20 @@ function Dashboard() {
           value={`${late.length} · ${money(sumBalance(late))}`}
           tone={late.length ? "danger" : "default"}
           to="/parcelas"
+          search={{ filtro: "ATRASADA" }}
         />
-        <Card label="Vencem em 7 dias" value={money(sumBalance(next7))} to="/parcelas" />
-        <Card label="Vencem em 30 dias" value={money(sumBalance(next30))} to="/parcelas" />
+        <Card
+          label="Vencem em 7 dias"
+          value={money(sumBalance(next7))}
+          to="/parcelas"
+          search={{ filtro: "VENCE_7" }}
+        />
+        <Card
+          label="Vencem em 30 dias"
+          value={money(sumBalance(next30))}
+          to="/parcelas"
+          search={{ filtro: "VENCE_30" }}
+        />
         <Card
           label="Terceiros recebidos"
           value={money(thirdPartyReceived)}
@@ -303,6 +326,7 @@ function Dashboard() {
               <li key={a.text}>
                 <Link
                   to={a.to}
+                  {...(a.search ? { search: a.search } : {})}
                   className="text-sm text-foreground underline-offset-4 hover:underline"
                 >
                   {a.text}
