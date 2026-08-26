@@ -43,6 +43,19 @@ export function friendlyError(e: unknown): string {
     return raw || "Não foi possível concluir a ação.";
   }
 
+  // O banco está desatualizado em relação ao app: a tela chama uma função ou
+  // coluna que a migration correspondente ainda não criou. Sem esta mensagem
+  // o usuário via só "avise o suporte", sem pista do que fazer.
+  if (code === "PGRST202" || /could not find the function/i.test(raw)) {
+    return "O banco de dados está desatualizado: falta aplicar a última migration do Supabase. Avise o responsável técnico.";
+  }
+  if (code === "PGRST203" || /could not choose the best candidate function/i.test(raw)) {
+    return "O banco de dados tem duas versões da mesma função. É preciso remover a versão antiga no Supabase.";
+  }
+  if (code === "PGRST204" || /could not find the '.*' column/i.test(raw)) {
+    return "O banco de dados está desatualizado: falta uma coluna criada pela última migration. Avise o responsável técnico.";
+  }
+
   if (/row-level security policy/i.test(raw))
     return "Você não tem permissão para realizar esta ação.";
   if (/failed to fetch|network ?error/i.test(raw))

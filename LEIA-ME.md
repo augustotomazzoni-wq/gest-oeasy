@@ -1,92 +1,75 @@
-# Atualização de 26/08/2026 — versão final
+# Atualização de 27/08/2026
 
-Este pacote inclui **tudo** das rodadas anteriores. Se você não aplicou os zips anteriores, use só este.
+Inclui tudo das rodadas anteriores. Se você não aplicou os zips anteriores, use só este.
 
 ## Como aplicar
 
-**1. Banco (Supabase → SQL Editor → Run)**
+**1. Banco (Supabase → SQL Editor → Run)** — nesta ordem:
 
-Confirme primeiro se as migrations anteriores já rodaram:
+Confirme primeiro o que já rodou:
 
 ```sql
 select column_name from information_schema.columns
 where table_name = 'clients' and column_name = 'payer_names';
 ```
 
-- **Se voltar vazio:** rode antes, nesta ordem, os arquivos que já estão em `supabase/migrations/`:
-  `20260824090000_...`, `20260824120000_...`, `20260825120000_...`
-- **Depois** (ou direto, se a consulta retornou a linha), rode **nesta ordem** os dois novos:
+- **Se voltar vazio:** rode antes `20260824090000_...`, `20260824120000_...`, `20260825120000_...`
+- **Depois**, rode os três novos **nesta ordem**:
   1. `20260826120000_correcoes_varredura.sql`
   2. `20260826150000_estorno_e_cancelamento.sql`
+  3. `20260827100000_campos_advbox.sql`
 
-A ordem importa: o segundo arquivo reescreve funções que o primeiro cria.
+**2. Código:** copie os arquivos por cima da pasta clonada e faça commit + push.
 
-**2. Código:** copie os arquivos por cima da sua pasta clonada, mantendo os caminhos, e faça commit + push pelo GitHub Desktop.
+**3. Importe seus dados:** abra a tela **Importar e Exportar** e envie os dois arquivos do Advbox (um de cada vez). Não precisa mais de script SQL.
 
 ---
 
 ## Novidades desta rodada
 
-### Redefinir senha agora funciona
-Antes, o link do e-mail entrava direto no sistema sem nunca pedir a senha nova — a pessoa perdia o acesso quando a sessão expirava. Agora o link abre uma tela **"Definir nova senha"**, com confirmação da senha e mínimo de 8 caracteres. Só depois de salvar é que entra no sistema.
+### Campos novos, iguais aos do Advbox
 
-### Sucumbência: agora você escolhe se está dentro ou fora do valor
-Este era um erro de dinheiro real. O sistema **sempre somava a sucumbência por cima do valor bruto**, em silêncio: um acordo de R$ 10.000 com R$ 2.000 de sucumbência gerava parcelas somando R$ 12.000, enquanto a coluna "Bruto" mostrava R$ 10.000.
+**Clientes** ganharam: RG, data de nascimento, estado civil, PIS/PASEP, CTPS, CID, profissão, sexo, telefone fixo, país, estado, cidade, endereço, bairro, CEP, nome da mãe e origem.
 
-Como a sucumbência é paga pela parte perdedora, ela **legitimamente** pode estar por fora do acordo ou já embutida nele — depende do caso. Então em vez de escolher por você, o sistema agora pergunta:
+**Processos** ganharam: grupo de ação, fase judicial, etapa, número do protocolo, processo originário, pasta/caso, ano, data do requerimento, segmento, comarca, vara, data do fechamento, data do trânsito em julgado, data do arquivamento, resultado, valor da causa, valor dos honorários, % de honorários, contingenciamento e último andamento.
 
-- Ao informar a sucumbência, aparece a opção **"A sucumbência já está dentro do valor bruto"**;
-- Logo abaixo, o total a distribuir é mostrado na hora;
-- Na etapa final, aparece a conferência: valor bruto × total distribuído, com a diferença explicada;
-- Se as contas não fecharem, o sistema bloqueia e diz exatamente qual é a diferença.
+Todos são opcionais — preencha só o que interessar.
 
-O padrão continua "por fora" (comportamento atual), então nenhum acordo já cadastrado muda de valor.
+### Importação que entende o formato do Advbox
 
-### Tabelas ajustadas para o valor real
+A tela reconhece sozinha qual planilha você enviou, sem precisar escolher nada:
 
-**Lista de Acordos** ganhou a coluna **"Total a receber"** — o que será efetivamente cobrado nas parcelas. Quando difere do valor bruto (sucumbência por fora), a diferença aparece embaixo do número: "+R$ 2.000 sobre o bruto". O "Bruto" continua na tabela, em cinza, como valor de referência do acordo.
+- **Clientes do Advbox** — cria os novos e **atualiza os que já existem**, casando pelo CPF/CNPJ (ou pelo nome, quando não há CPF).
+- **Processos do Advbox** — casa pelo número do processo; sem número, casa por cliente + parte contrária. Se o cliente ainda não existir, é criado a partir do nome e CPF que vêm no próprio arquivo, com um aviso para completar depois.
+- **Planilha de controle de recebíveis** (a antiga, com abas "Clientes" e "Parcelas a Receber") continua funcionando como antes.
 
-**Cronograma da etapa 4** agora se recalcula sozinho quando qualquer valor que muda o total é alterado — valor bruto, honorários, sucumbência (e a opção de dentro/fora), custas, entrada, número de parcelas. Antes, se você editasse as parcelas à mão e depois voltasse e mudasse um valor, o cronograma continuava somando o total antigo. Quando isso acontece, aparece um aviso dizendo que foi recalculado e que as edições manuais anteriores foram descartadas.
+Antes de gravar, mostra uma prévia com a contagem, os avisos e as primeiras linhas. Nada é gravado até você confirmar.
 
-### Importação: cliente com dois acordos não perde mais um
-A verificação anti-duplicidade era por cliente, então o segundo acordo do mesmo cliente era descartado com a mensagem "já importado". Agora ela identifica cada acordo pelo número do processo (ou parte contrária).
+**Testado com seus arquivos reais:**
+- Clientes: 206 linhas → 205 importáveis (avisou 1 cadastro repetido: MIRIAM FUSCO DE SOUZA)
+- Processos: 170 linhas → 169 importáveis (avisou 1 número de processo repetido)
+- Avisa também: 8 clientes sem CPF e 50 processos sem número
 
-**Ressalva honesta:** a aba de parcelas da planilha só identifica o cliente, não o acordo. Quando o mesmo cliente tem dois acordos, não há como o sistema saber a qual deles cada parcela pertence — então elas ficam no primeiro acordo e aparece um aviso pedindo a conferência manual. Preferi avisar a adivinhar errado.
+### Exportação no mesmo formato
 
-### Saldo inicial da conta bancária passa a respeitar a data
-A "Data do saldo inicial" era preenchida e ignorada: lançamentos anteriores a ela entravam no saldo mesmo assim, inflando o valor sem deixar pista. Agora só entram as movimentações a partir dessa data.
+Dois botões no topo da tela: **Exportar clientes** e **Exportar processos**. Geram um `.xlsx` com exatamente as mesmas colunas do Advbox, na mesma ordem — então o arquivo que você baixa daqui pode ser reimportado aqui (ou levado para o Advbox) sem ajuste nenhum.
 
-### Auditoria aponta para o registro certo
-O log de recebimento gravava o id da parcela, e o de repasse gravava o id do cliente — numa investigação futura a trilha apontava para uma linha inexistente. Corrigido.
+Valores saem formatados como no Advbox (`R$39.111,96`), datas em `dd/mm/aaaa`, e o cliente do processo sai como `NOME (CPF)`.
 
 ---
 
 ## Já incluído (rodadas anteriores)
 
-### Estorno e cancelamento
-- **Estornar recebimento** — botão "Recebimentos" em cada parcela paga abre o histórico com botão "Estornar" em cada lançamento. Exige motivo. O valor sai do saldo da parcela, do caixa e do saldo a repassar. Nada é apagado: fica riscado no histórico com quem, quando e por quê.
-- **Cancelar parcela / acordo / repasse** — com motivo obrigatório. Acordo cancelado cancela junto as parcelas em aberto. Repasse cancelado devolve o valor ao saldo a repassar.
-- Usa a permissão "Cancelar/estornar" da matriz de perfis: Administrador Principal, Sócio Gestor e Financeiro.
-
-### Dashboard e clientes
-- Filtro Dia / Semana / Mês / Ano com lucro por processo ativo.
-- Cadastro de cliente sem nenhum campo obrigatório.
-- Campo de pagadores + busca por nome, CPF/CNPJ e quem pagou + exportação em Excel.
-
-### Correções críticas
-- Importação de planilha estava quebrada em qualquer parcela paga.
-- Mensagens de proteção eram engolidas ("avise o suporte técnico").
-- Repasse em dobro passava sem aviso.
-- Fluxo de Caixa contava dinheiro da cliente como receita (até 3× de diferença com o Dashboard).
-- Parcela vencida com pagamento parcial sumia dos atrasos.
-- Formulários guardavam dados do registro anterior.
-- Campo "Observações" do Caixa era descartado.
-- Duas falhas de permissão (alteração de papéis sem checagem de organização; Sócio Gestor via todos como "Consulta Restrita").
-- Menu mostrava telas sem permissão, que abriam zeradas.
-- Erros de login em inglês.
+- **Estorno e cancelamento** de recebimento, parcela, acordo e repasse — com motivo obrigatório e histórico preservado.
+- **Redefinir senha** funcionando de verdade.
+- **Sucumbência**: você escolhe se está dentro ou fora do valor bruto; o total aparece antes de confirmar.
+- **Tabela de acordos** com a coluna "Total a receber" e o cronograma que se recalcula sozinho.
+- **Dashboard** com filtro Dia/Semana/Mês/Ano e lucro por processo ativo.
+- **Cadastro de cliente** sem nenhum campo obrigatório, com campo de pagadores e busca por quem pagou.
+- Correções: importação quebrada, mensagens de erro engolidas, repasse em dobro, caixa contando dinheiro da cliente como receita, parcela vencida sumindo dos atrasos, formulários com dados antigos, duas falhas de permissão.
 
 ---
 
 ## O que continua fora
 
-**Editar um acordo já criado** — só dá para cancelar. Editar mexe no cronograma e nas parcelas já geradas: o que fazer com parcelas já pagas, se o novo valor for menor que o já recebido, se as datas mudam. É uma decisão de negócio, não de código — me diga como o escritório quer que funcione e eu implemento.
+**Editar um acordo já criado** — só dá para cancelar. Editar mexe no cronograma e nas parcelas já geradas (o que fazer com parcelas já pagas, se o novo valor for menor que o recebido). É decisão de negócio: me diga como o escritório quer que funcione e eu implemento.
