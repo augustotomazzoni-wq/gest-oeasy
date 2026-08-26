@@ -971,6 +971,32 @@ function ParcelasPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Exclusão definitiva (Administrador Principal) */}
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Apagar parcela cancelada</DialogTitle>
+            <DialogDescription>
+              A parcela {deleteTarget?.label || `nº ${deleteTarget?.number ?? ""}`} será apagada
+              definitivamente do sistema. Esta ação não pode ser desfeita — fica apenas o registro
+              na auditoria.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteInstallment.isPending}
+              onClick={() => deleteInstallment.mutate()}
+            >
+              {deleteInstallment.isPending ? "Apagando…" : "Apagar definitivamente"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
