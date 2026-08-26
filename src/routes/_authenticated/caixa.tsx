@@ -131,6 +131,7 @@ function CaixaPage() {
         competence_date: form.paid_on,
         bank_account_id: form.bank_account_id || null,
         category_id: form.category_id || null,
+        notes: form.notes.trim() || null,
       });
       if (error) throw error;
     },
@@ -150,7 +151,15 @@ function CaixaPage() {
         description="Movimentações do escritório separadas dos valores de terceiros."
         action={
           canLaunch && (
-            <Dialog open={open} onOpenChange={setOpen}>
+            <Dialog
+              open={open}
+              onOpenChange={(v) => {
+                setOpen(v);
+                // Limpa ao fechar: sem isto o próximo "Novo lançamento" abre
+                // com o valor e a descrição do lançamento abandonado.
+                if (!v) setForm(EMPTY);
+              }}
+            >
               <DialogTrigger asChild>
                 <Button>Novo lançamento</Button>
               </DialogTrigger>

@@ -7,7 +7,7 @@ import { Tag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/useAuth";
-import { money, dateBR, num } from "@/lib/format";
+import { money, dateBR, num, todayISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { parseWorkbook, matchKey, type ParsedWorkbook } from "@/lib/import-xlsx";
 import { toast } from "sonner";
@@ -68,6 +68,7 @@ function ImportarPage() {
         .from("clients")
         .select("id, name")
         .is("deleted_at", null);
+      const seenPerClient = new Map<string, number>();
       const clientIds = new Map((existing ?? []).map((c) => [matchKey(c.name), c.id] as const));
 
       for (const c of parsed.clients) {
@@ -89,18 +90,27 @@ function ImportarPage() {
           clientIds.set(key, clientId);
         }
 
-        // Se uma importação anterior falhou no meio do caminho, este cliente
-        // pode já ter um acordo importado — pula para não duplicar parcelas
-        // e recebimentos ao confirmar de novo.
+        // Identifica a linha da planilha para que um cliente com mais de um
+        // acordo não seja confundido com uma reimportação. Antes a checagem
+        // era só por cliente, então o segundo acordo era descartado.
+        const rowIndex = (seenPerClient.get(key) ?? 0) + 1;
+        seenPerClient.set(key, rowIndex);
+        const importTag = c.case_number?.trim() || c.opposing_party?.trim() || `linha ${rowIndex}`;
+        const importDescription = `Importado da planilha de controle — ${importTag}`;
+
+        // Se uma importação anterior falhou no meio do caminho, este acordo
+        // pode já existir — pula para não duplicar parcelas e recebimentos.
         const { data: alreadyImported } = await supabase
           .from("legal_receivables")
           .select("id")
           .eq("client_id", clientId)
-          .eq("description", "Importado da planilha de controle")
+          .eq("description", importDescription)
           .is("deleted_at", null)
           .maybeSingle();
         if (alreadyImported) {
-          messages.push(`${c.name}: já importado anteriormente — pulado para evitar duplicidade.`);
+          messages.push(
+            `${c.name} (${importTag}): já importado anteriormente — pulado para evitar duplicidade.`,
+          );
           continue;
         }
 
@@ -149,13 +159,23 @@ function ImportarPage() {
             expected_firm_amount: c.firm_amount,
             expected_client_amount: clientShare,
             notes: c.notes,
-            description: "Importado da planilha de controle",
+            description: importDescription,
           })
           .select("id")
           .single();
         if (rErr) throw new Error(`Acordo de ${c.name}: ${friendlyError(rErr)}`);
 
-        const rows = parsed.installments.filter((i) => matchKey(i.client) === key);
+        // A aba de parcelas só identifica o cliente, não o acordo. Quando o
+        // mesmo cliente tem mais de um acordo na planilha, não há como saber a
+        // qual deles cada parcela pertence — então as parcelas vão para o
+        // primeiro acordo e o aviso abaixo pede a conferência manual.
+        const rows =
+          rowIndex === 1 ? parsed.installments.filter((i) => matchKey(i.client) === key) : [];
+        if (rowIndex > 1 && parsed.installments.some((i) => matchKey(i.client) === key)) {
+          messages.push(
+            `${c.name} (${importTag}): 2º acordo do mesmo cliente — as parcelas da planilha ficaram no primeiro acordo. Confira e mova as que forem deste.`,
+          );
+        }
         const list = rows.length
           ? rows
           : c.firm_amount > 0
@@ -194,14 +214,23 @@ function ImportarPage() {
           if (iErr) throw new Error(`Parcela de ${c.name}: ${friendlyError(iErr)}`);
 
           if (p.paid && p.firm_amount > 0) {
+            // O valor importado é 100% honorário do escritório e entrou na
+            // conta dele. Os campos de destino precisam ser informados
+            // explicitamente: sem eles o banco rejeita o lançamento, porque
+            // amount_received_in_firm_account (padrão 0) tem que bater com a
+            // soma dos honorários.
             const { error: pErr } = await supabase.from("receipts").insert({
               organization_id: org,
               created_by: profile.id,
               installment_id: inst.id,
-              received_on: p.received_on ?? p.due_date ?? new Date().toISOString().slice(0, 10),
+              received_on: p.received_on ?? p.due_date ?? todayISO(),
               total_amount: p.firm_amount,
               fee_amount: p.firm_amount,
               client_amount: 0,
+              receipt_destination: "conta_escritorio",
+              amount_received_in_firm_account: p.firm_amount,
+              client_amount_received_by_firm: 0,
+              client_amount_received_direct: 0,
               notes: "Importado da planilha",
             });
             if (pErr) throw new Error(`Recebimento de ${c.name}: ${friendlyError(pErr)}`);

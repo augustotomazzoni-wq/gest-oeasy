@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import {
   Bar,
   BarChart,
@@ -16,8 +17,74 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { StatusBadge } from "@/components/StatusBadge";
-import { money, num, dateBR, todayISO, daysBetween } from "@/lib/format";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  money,
+  num,
+  dateBR,
+  todayISO,
+  daysBetween,
+  addDaysISO,
+  addMonthsISO,
+  startOfWeekISO,
+  endOfWeekISO,
+  startOfMonthISO,
+  endOfMonthISO,
+  startOfYearISO,
+  endOfYearISO,
+} from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
+
+const MONTH_NAMES = [
+  "Janeiro",
+  "Fevereiro",
+  "Março",
+  "Abril",
+  "Maio",
+  "Junho",
+  "Julho",
+  "Agosto",
+  "Setembro",
+  "Outubro",
+  "Novembro",
+  "Dezembro",
+];
+
+type PeriodType = "dia" | "semana" | "mes" | "ano";
+
+function periodRange(type: PeriodType, anchor: string): { start: string; end: string } {
+  switch (type) {
+    case "dia":
+      return { start: anchor, end: anchor };
+    case "semana":
+      return { start: startOfWeekISO(anchor), end: endOfWeekISO(anchor) };
+    case "ano":
+      return { start: startOfYearISO(anchor), end: endOfYearISO(anchor) };
+    case "mes":
+    default:
+      return { start: startOfMonthISO(anchor), end: endOfMonthISO(anchor) };
+  }
+}
+
+function periodLabel(type: PeriodType, anchor: string): string {
+  const { start, end } = periodRange(type, anchor);
+  if (type === "dia") return dateBR(anchor);
+  if (type === "semana") return `${dateBR(start)} – ${dateBR(end)}`;
+  if (type === "ano") return anchor.slice(0, 4);
+  const [y, m] = anchor.split("-").map(Number);
+  return `${MONTH_NAMES[(m ?? 1) - 1]} de ${y}`;
+}
+
+function shiftAnchor(type: PeriodType, anchor: string, direction: 1 | -1): string {
+  if (type === "dia") return addDaysISO(anchor, direction);
+  if (type === "semana") return addDaysISO(anchor, direction * 7);
+  if (type === "ano") {
+    const [y, m, d] = anchor.split("-");
+    return `${Number(y) + direction}-${m}-${d}`;
+  }
+  return addMonthsISO(anchor, direction);
+}
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -60,7 +127,7 @@ function useDashboardData() {
   return useQuery({
     queryKey: ["dashboard"],
     queryFn: async () => {
-      const [inst, balances, banks, txs, receivables] = await Promise.all([
+      const [inst, balances, banks, txs, receivables, activeCases] = await Promise.all([
         supabase.from("v_installments").select("*"),
         supabase.from("v_client_balances").select("*"),
         supabase.from("v_bank_balances").select("*"),
@@ -72,6 +139,11 @@ function useDashboardData() {
           .from("legal_receivables")
           .select("id, status, is_estimated, expected_firm_amount, description, client_id")
           .is("deleted_at", null),
+        supabase
+          .from("cases")
+          .select("id", { count: "exact", head: true })
+          .eq("status", "ativo")
+          .is("deleted_at", null),
       ]);
       if (inst.error) throw inst.error;
       return {
@@ -80,7 +152,36 @@ function useDashboardData() {
         banks: banks.data ?? [],
         txs: txs.data ?? [],
         receivables: receivables.data ?? [],
+        activeCasesCount: activeCases.count ?? 0,
       };
+    },
+  });
+}
+
+/**
+ * Números do período escolhido (dia/semana/mês/ano). Busca separada da consulta
+ * principal para não recarregar o dashboard inteiro a cada troca de filtro.
+ */
+function usePeriodData(start: string, end: string) {
+  return useQuery({
+    queryKey: ["dashboard-period", start, end],
+    queryFn: async () => {
+      const [receipts, txs] = await Promise.all([
+        supabase
+          .from("receipts")
+          .select("fee_amount, success_fee_amount, client_amount_received_by_firm, received_on")
+          .gte("received_on", start)
+          .lte("received_on", end),
+        supabase
+          .from("financial_transactions")
+          .select("type, amount, paid_on")
+          .eq("status", "pago")
+          .gte("paid_on", start)
+          .lte("paid_on", end),
+      ]);
+      if (receipts.error) throw receipts.error;
+      if (txs.error) throw txs.error;
+      return { receipts: receipts.data ?? [], txs: txs.data ?? [] };
     },
   });
 }
@@ -132,6 +233,11 @@ function Dashboard() {
   const { data, isLoading, error } = useDashboardData();
   const today = todayISO();
 
+  const [periodType, setPeriodType] = useState<PeriodType>("mes");
+  const [anchor, setAnchor] = useState(today);
+  const { start: periodStart, end: periodEnd } = periodRange(periodType, anchor);
+  const { data: periodData, isLoading: periodLoading } = usePeriodData(periodStart, periodEnd);
+
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">Carregando indicadores…</p>;
   }
@@ -143,6 +249,27 @@ function Dashboard() {
     );
   }
   const d = data!;
+
+  // Lucro do período conta só a parte do escritório (honorários + sucumbência)
+  // recebida no intervalo, menos as despesas pagas no mesmo intervalo. O valor
+  // que pertence à cliente fica de fora: entra no caixa como dinheiro de
+  // terceiros, mas não é receita nem lucro do escritório.
+  const periodFirmRevenue = (periodData?.receipts ?? []).reduce(
+    (s, r) => s + num(r.fee_amount) + num(r.success_fee_amount),
+    0,
+  );
+  // Só o que passou pela conta do escritório vira obrigação de repasse. O que
+  // a cliente recebeu direto nunca entra no caixa nem gera repasse.
+  const periodClientReceived = (periodData?.receipts ?? []).reduce(
+    (s, r) => s + num(r.client_amount_received_by_firm),
+    0,
+  );
+  const periodExpenses = (periodData?.txs ?? [])
+    .filter((t) => t.type === "saida")
+    .reduce((s, t) => s + num(t.amount), 0);
+  const periodProfit = periodFirmRevenue - periodExpenses;
+  const activeCases = d.activeCasesCount;
+  const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
 
   const totalBank = d.banks.reduce((s, b) => s + num(b.balance as number), 0);
   const firmRevenue = d.installments.reduce(
@@ -258,6 +385,107 @@ function Dashboard() {
         title="Dashboard"
         description="Visão consolidada do caixa, dos recebíveis e dos valores de clientes."
       />
+
+      <div className="panel mb-6 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-semibold">Resultado do período</h2>
+            <p className="text-xs text-muted-foreground">
+              Só a parte do escritório — o valor que pertence à cliente fica de fora.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {(
+              [
+                ["dia", "Dia"],
+                ["semana", "Semana"],
+                ["mes", "Mês"],
+                ["ano", "Ano"],
+              ] as const
+            ).map(([key, label]) => (
+              <Button
+                key={key}
+                size="sm"
+                variant={periodType === key ? "default" : "outline"}
+                onClick={() => setPeriodType(key)}
+              >
+                {label}
+              </Button>
+            ))}
+            <div className="flex items-center gap-1">
+              <Button
+                size="sm"
+                variant="outline"
+                aria-label="Período anterior"
+                onClick={() => setAnchor((a) => shiftAnchor(periodType, a, -1))}
+              >
+                ‹
+              </Button>
+              <Input
+                type="date"
+                className="w-40"
+                aria-label="Data de referência do período"
+                value={anchor}
+                onChange={(e) => setAnchor(e.target.value || today)}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                aria-label="Próximo período"
+                onClick={() => setAnchor((a) => shiftAnchor(periodType, a, 1))}
+              >
+                ›
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <p className="num mt-3 text-sm text-muted-foreground">{periodLabel(periodType, anchor)}</p>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Receita do escritório</p>
+            <p className="num mt-1 text-xl font-semibold text-success">
+              {periodLoading ? "…" : money(periodFirmRevenue)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Honorários + sucumbência</p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Despesas pagas</p>
+            <p className="num mt-1 text-xl font-semibold text-destructive">
+              {periodLoading ? "…" : money(periodExpenses)}
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Lucro do período</p>
+            <p
+              className={`num mt-1 text-xl font-semibold ${
+                periodProfit >= 0 ? "text-success" : "text-destructive"
+              }`}
+            >
+              {periodLoading ? "…" : money(periodProfit)}
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Lucro por processo ativo</p>
+            <p className="num mt-1 text-xl font-semibold">
+              {periodLoading ? "…" : money(profitPerCase)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{activeCases} processo(s) ativo(s)</p>
+          </div>
+        </div>
+
+        <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+          Neste período,{" "}
+          <strong className="num text-foreground">{money(periodClientReceived)}</strong> pertencem
+          às clientes e não entram nas contas acima — é dinheiro de terceiros que ainda vai (ou já
+          foi) para{" "}
+          <Link to="/repasses" className="underline underline-offset-2">
+            Repasses a Clientes
+          </Link>
+          .
+        </div>
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Card label="Saldo em contas" value={money(totalBank)} to="/caixa" />

@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -159,6 +160,7 @@ const EMPTY = {
   fee_percent: "",
   fee_fixed_amount: "",
   success_fee_amount: "",
+  success_fee_included: false,
   cost_reimbursement: "",
   expected_firm_amount: "",
   expected_client_amount: "",
@@ -178,12 +180,44 @@ const EMPTY = {
 };
 
 function AcordosPage() {
-  const { profile, canWrite } = useAuth();
+  const { profile, canWrite, can } = useAuth();
+  const canCancel = can("acordos", "cancel_or_reverse");
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>(1);
   const [form, setForm] = useState(EMPTY);
   const [editedSchedule, setEditedSchedule] = useState<ScheduleRow[] | null>(null);
+  // Campos que mudam o total do acordo. Ao alterar qualquer um deles, o
+  // cronograma editado à mão deixa de valer — voltamos para a sugestão
+  // recalculada, senão as parcelas continuariam somando o total antigo.
+  const TOTALS_FIELDS = [
+    "gross_amount",
+    "fee_percent",
+    "fee_fixed_amount",
+    "success_fee_amount",
+    "success_fee_included",
+    "cost_reimbursement",
+    "expected_firm_amount",
+    "expected_client_amount",
+    "has_entry",
+    "entry_amount",
+    "entry_due",
+    "parcels",
+    "first_due",
+    "periodicity",
+    "distribution_mode",
+    "no_schedule",
+  ] as const;
+
+  function updateForm(patch: Partial<typeof EMPTY>) {
+    setForm((current) => ({ ...current, ...patch }));
+    if (Object.keys(patch).some((k) => (TOTALS_FIELDS as readonly string[]).includes(k))) {
+      setEditedSchedule(null);
+    }
+  }
+
+  const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
 
   const { data, isLoading } = useQuery({
     queryKey: ["acordos"],
@@ -220,8 +254,18 @@ function AcordosPage() {
   const contractualFee = form.fee_percent ? feeFromPercent : num(Number(form.fee_fixed_amount));
   const successFee = num(Number(form.success_fee_amount));
   const costs = num(Number(form.cost_reimbursement));
+  // A sucumbência é paga pela parte perdedora, então às vezes vem por fora do
+  // valor do acordo e às vezes já está embutida nele. Quem cadastra informa
+  // qual é o caso — antes o sistema sempre assumia "por fora" em silêncio, e o
+  // cronograma somava mais que o valor bruto sem explicar o motivo.
+  const successInsideGross = form.success_fee_included;
   const suggestedFirm = contractualFee + successFee;
-  const suggestedClient = Math.max(gross - contractualFee - costs, 0);
+  const suggestedClient = Math.max(
+    gross - contractualFee - costs - (successInsideGross ? successFee : 0),
+    0,
+  );
+  // Quanto o cronograma inteiro deve somar, partindo do valor bruto.
+  const expectedGrossTotal = gross + (successInsideGross ? 0 : successFee);
   const firm = form.expected_firm_amount ? num(Number(form.expected_firm_amount)) : suggestedFirm;
   const client = form.expected_client_amount
     ? num(Number(form.expected_client_amount))
@@ -318,11 +362,19 @@ function AcordosPage() {
       errors.push("A soma destinada ao cliente não fecha com o valor esperado.");
     if (Math.abs(scheduleTotals.costs - costs) > 0.01)
       errors.push("A soma dos reembolsos não fecha com o valor esperado.");
+    if (gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > 0.01)
+      errors.push(
+        `O total distribuído (${money(expectedTotal)}) não fecha com o valor bruto` +
+          `${successInsideGross ? "" : " + sucumbência"} (${money(expectedGrossTotal)}).`,
+      );
     return [...new Set(errors)];
   }, [
     client,
     costs,
     firm,
+    gross,
+    expectedGrossTotal,
+    successInsideGross,
     form.entry_amount,
     form.has_entry,
     form.no_schedule,
@@ -398,6 +450,25 @@ function AcordosPage() {
     onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
   });
 
+  const cancelReceivable = useMutation({
+    mutationFn: async () => {
+      if (!cancelTarget) throw new Error("Acordo inválido");
+      if (!cancelReason.trim()) throw new Error("Informe o motivo do cancelamento");
+      const { error } = await supabase.rpc("cancel_receivable", {
+        _receivable_id: cancelTarget.id,
+        _reason: cancelReason.trim(),
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Acordo cancelado.");
+      setCancelTarget(null);
+      setCancelReason("");
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
+  });
+
   const casesForClient = (data?.cases ?? []).filter((c) => c.client_id === form.client_id);
 
   const stepValid =
@@ -423,6 +494,9 @@ function AcordosPage() {
                 if (!v) {
                   setStep(1);
                   setEditedSchedule(null);
+                  // Sem limpar o form, o próximo acordo abre com o cliente e
+                  // os valores do acordo abandonado ainda preenchidos.
+                  setForm(EMPTY);
                 }
               }}
             >
@@ -529,7 +603,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.gross_amount}
-                        onChange={(e) => setForm({ ...form, gross_amount: e.target.value })}
+                        onChange={(e) => updateForm({ gross_amount: e.target.value })}
                       />
                       {gross <= 0 && (
                         <p className="text-xs text-destructive">Informe um valor maior que zero.</p>
@@ -552,7 +626,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.fee_percent}
-                        onChange={(e) => setForm({ ...form, fee_percent: e.target.value })}
+                        onChange={(e) => updateForm({ fee_percent: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -563,7 +637,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.fee_fixed_amount}
-                        onChange={(e) => setForm({ ...form, fee_fixed_amount: e.target.value })}
+                        onChange={(e) => updateForm({ fee_fixed_amount: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -574,8 +648,26 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.success_fee_amount}
-                        onChange={(e) => setForm({ ...form, success_fee_amount: e.target.value })}
+                        onChange={(e) => updateForm({ success_fee_amount: e.target.value })}
                       />
+                      {successFee > 0 && (
+                        <label className="flex items-start gap-2 pt-1 text-xs">
+                          <Checkbox
+                            checked={form.success_fee_included}
+                            onCheckedChange={(v) =>
+                              updateForm({ success_fee_included: v === true })
+                            }
+                          />
+                          <span className="text-muted-foreground">
+                            A sucumbência já está dentro do valor bruto.
+                            <span className="mt-0.5 block">
+                              {form.success_fee_included
+                                ? `Total a distribuir: ${money(gross)}.`
+                                : `Por fora — total a distribuir: ${money(gross + successFee)}.`}
+                            </span>
+                          </span>
+                        </label>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="cst">Reembolso de custas</Label>
@@ -585,7 +677,7 @@ function AcordosPage() {
                         step="0.01"
                         min="0"
                         value={form.cost_reimbursement}
-                        onChange={(e) => setForm({ ...form, cost_reimbursement: e.target.value })}
+                        onChange={(e) => updateForm({ cost_reimbursement: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
@@ -627,9 +719,7 @@ function AcordosPage() {
                           step="0.01"
                           placeholder={String(suggestedFirm.toFixed(2))}
                           value={form.expected_firm_amount}
-                          onChange={(e) =>
-                            setForm({ ...form, expected_firm_amount: e.target.value })
-                          }
+                          onChange={(e) => updateForm({ expected_firm_amount: e.target.value })}
                         />
                         <p className="text-xs text-muted-foreground">
                           Sugerido: {money(suggestedFirm)} (honorários + sucumbência)
@@ -643,9 +733,7 @@ function AcordosPage() {
                           step="0.01"
                           placeholder={String(suggestedClient.toFixed(2))}
                           value={form.expected_client_amount}
-                          onChange={(e) =>
-                            setForm({ ...form, expected_client_amount: e.target.value })
-                          }
+                          onChange={(e) => updateForm({ expected_client_amount: e.target.value })}
                         />
                         <p className="text-xs text-muted-foreground">
                           Sugerido: {money(suggestedClient)}
@@ -665,7 +753,7 @@ function AcordosPage() {
                     <label className="flex items-center gap-2 text-sm">
                       <Checkbox
                         checked={form.no_schedule}
-                        onCheckedChange={(v) => setForm({ ...form, no_schedule: v === true })}
+                        onCheckedChange={(v) => updateForm({ no_schedule: v === true })}
                       />
                       Ainda sem cronograma definido (a definir)
                     </label>
@@ -676,10 +764,7 @@ function AcordosPage() {
                           <Select
                             value={form.distribution_mode}
                             onValueChange={(v) =>
-                              setForm({
-                                ...form,
-                                distribution_mode: v as DistributionMode,
-                              })
+                              updateForm({ distribution_mode: v as DistributionMode })
                             }
                           >
                             <SelectTrigger>
@@ -703,7 +788,7 @@ function AcordosPage() {
                         <label className="flex items-center gap-2 text-sm">
                           <Checkbox
                             checked={form.has_entry}
-                            onCheckedChange={(v) => setForm({ ...form, has_entry: v === true })}
+                            onCheckedChange={(v) => updateForm({ has_entry: v === true })}
                           />
                           O acordo possui entrada
                         </label>
@@ -718,7 +803,7 @@ function AcordosPage() {
                                 min="0"
                                 step="0.01"
                                 value={form.entry_amount}
-                                onChange={(e) => setForm({ ...form, entry_amount: e.target.value })}
+                                onChange={(e) => updateForm({ entry_amount: e.target.value })}
                               />
                             </div>
                             <div className="space-y-2">
@@ -727,7 +812,7 @@ function AcordosPage() {
                                 id="entry-date"
                                 type="date"
                                 value={form.entry_due}
-                                onChange={(e) => setForm({ ...form, entry_due: e.target.value })}
+                                onChange={(e) => updateForm({ entry_due: e.target.value })}
                               />
                             </div>
                           </div>
@@ -743,7 +828,7 @@ function AcordosPage() {
                               type="number"
                               min="1"
                               value={form.parcels}
-                              onChange={(e) => setForm({ ...form, parcels: e.target.value })}
+                              onChange={(e) => updateForm({ parcels: e.target.value })}
                             />
                           </div>
                           <div className="space-y-2">
@@ -752,7 +837,7 @@ function AcordosPage() {
                               id="fst"
                               type="date"
                               value={form.first_due}
-                              onChange={(e) => setForm({ ...form, first_due: e.target.value })}
+                              onChange={(e) => updateForm({ first_due: e.target.value })}
                             />
                           </div>
                           <div className="space-y-2">
@@ -762,7 +847,7 @@ function AcordosPage() {
                               type="number"
                               min="1"
                               value={form.periodicity}
-                              onChange={(e) => setForm({ ...form, periodicity: e.target.value })}
+                              onChange={(e) => updateForm({ periodicity: e.target.value })}
                             />
                           </div>
                         </div>
@@ -787,6 +872,25 @@ function AcordosPage() {
                 {step === 4 && (
                   <div className="space-y-4">
                     <div className="panel p-4 text-sm">
+                      {gross > 0 && (
+                        <p className="mb-3 border-b border-border pb-3 text-xs text-muted-foreground">
+                          Valor bruto do acordo:{" "}
+                          <strong className="num text-foreground">{money(gross)}</strong>
+                          {successFee > 0 &&
+                            (successInsideGross ? (
+                              <> — sucumbência de {money(successFee)} já incluída.</>
+                            ) : (
+                              <>
+                                {" "}
+                                + sucumbência de {money(successFee)} por fora ={" "}
+                                <strong className="num text-foreground">
+                                  {money(expectedGrossTotal)}
+                                </strong>
+                                .
+                              </>
+                            ))}
+                        </p>
+                      )}
                       <div className="grid gap-2 sm:grid-cols-2">
                         <p>
                           Total a receber:{" "}
@@ -822,6 +926,12 @@ function AcordosPage() {
                             Altere as datas e indique exatamente quanto é do escritório e do
                             cliente.
                           </p>
+                          {!editedSchedule && (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Recalculado com os valores atuais — as alterações feitas à mão antes
+                              de mudar os valores foram descartadas.
+                            </p>
+                          )}
                         </div>
                         <Button
                           type="button"
@@ -992,27 +1102,35 @@ function AcordosPage() {
               <th>Tipo</th>
               <th>Situação</th>
               <th className="text-right">Bruto</th>
+              <th className="text-right">Total a receber</th>
               <th className="text-right">Escritório</th>
               <th className="text-right">Cliente</th>
-              <th className="p-3 text-right">Recebido</th>
+              <th className="text-right">Recebido</th>
+              {canCancel && <th className="p-3" />}
             </tr>
           </thead>
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={7} className="p-6 text-center text-muted-foreground">
+                <td colSpan={8} className="p-6 text-center text-muted-foreground">
                   Carregando…
                 </td>
               </tr>
             )}
             {!isLoading && (data?.receivables.length ?? 0) === 0 && (
               <tr>
-                <td colSpan={7} className="p-6 text-center text-muted-foreground">
+                <td colSpan={8} className="p-6 text-center text-muted-foreground">
                   Nenhum acordo cadastrado.
                 </td>
               </tr>
             )}
             {(data?.receivables ?? []).map((r) => {
+              // O que será efetivamente cobrado nas parcelas. Pode diferir do
+              // valor bruto quando a sucumbência foi cadastrada por fora dele.
+              const totalToReceive =
+                num(r.expected_firm_amount) +
+                num(r.expected_client_amount) +
+                num(r.cost_reimbursement);
               const paid = (data?.installments ?? [])
                 .filter((i) => i.receivable_id === r.id)
                 .reduce((s, i) => s + num(i.paid_total), 0);
@@ -1033,16 +1151,81 @@ function AcordosPage() {
                       {r.is_estimated && <Tag tone="warning">Estimado</Tag>}
                     </div>
                   </td>
-                  <td className="num text-right">{money(r.gross_amount)}</td>
+                  <td className="num text-right text-muted-foreground">{money(r.gross_amount)}</td>
+                  <td className="num text-right font-medium">
+                    {money(totalToReceive)}
+                    {Math.abs(totalToReceive - num(r.gross_amount)) > 0.01 && (
+                      <span className="block text-xs font-normal text-muted-foreground">
+                        {totalToReceive > num(r.gross_amount) ? "+" : "−"}
+                        {money(Math.abs(totalToReceive - num(r.gross_amount))).replace(
+                          "R$",
+                          "R$ ",
+                        )}{" "}
+                        sobre o bruto
+                      </span>
+                    )}
+                  </td>
                   <td className="num text-right">{money(r.expected_firm_amount)}</td>
                   <td className="num text-right">{money(r.expected_client_amount)}</td>
-                  <td className="num p-3 text-right">{money(paid)}</td>
+                  <td className="num text-right">{money(paid)}</td>
+                  {canCancel && (
+                    <td className="p-3 text-right whitespace-nowrap">
+                      {r.status !== "cancelado" && paid <= 0.01 && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() => {
+                            setCancelTarget({
+                              id: r.id,
+                              name: (r.clients as { name: string } | null)?.name ?? "acordo",
+                            });
+                            setCancelReason("");
+                          }}
+                        >
+                          Cancelar
+                        </Button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+
+      <Dialog open={!!cancelTarget} onOpenChange={(v) => !v && setCancelTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancelar acordo</DialogTitle>
+            <DialogDescription>
+              O acordo de {cancelTarget?.name} e as parcelas em aberto deixam de ser cobrados e saem
+              dos totais. O registro continua no histórico com o motivo.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="cancel-recv-reason">Motivo do cancelamento</Label>
+            <Textarea
+              id="cancel-recv-reason"
+              placeholder="Ex.: acordo desfeito, cadastrado em duplicidade…"
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              disabled={cancelReceivable.isPending || !cancelReason.trim()}
+              onClick={() => cancelReceivable.mutate()}
+            >
+              {cancelReceivable.isPending ? "Cancelando…" : "Cancelar acordo"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

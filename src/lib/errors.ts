@@ -14,12 +14,35 @@ const PG_CODE_MESSAGES: Record<string, string> = {
  * Erros sem código vêm de validações do próprio app (Error simples lançado
  * antes da rede) e já estão escritos para o usuário — são exibidos como estão.
  */
+/** Mensagens do Supabase Auth, que vêm sempre em inglês. */
+const AUTH_MESSAGES: [RegExp, string][] = [
+  [/invalid login credentials/i, "E-mail ou senha incorretos."],
+  [/email not confirmed/i, "Confirme seu e-mail antes de entrar."],
+  [/user already registered|already been registered/i, "Já existe um usuário com esse e-mail."],
+  [/password should be at least/i, "A senha deve ter ao menos 8 caracteres."],
+  [/unable to validate email|invalid email/i, "E-mail inválido."],
+  [/email rate limit|too many requests/i, "Muitas tentativas. Espere alguns minutos."],
+];
+
 export function friendlyError(e: unknown): string {
   const err = e as PgError | Error | null | undefined;
   const raw = err instanceof Error ? err.message : String(err ?? "");
   const code = (err as PgError | null | undefined)?.code;
 
+  for (const [pattern, message] of AUTH_MESSAGES) {
+    if (pattern.test(raw)) return message;
+  }
+
   if (code && PG_CODE_MESSAGES[code]) return PG_CODE_MESSAGES[code];
+
+  // P0001/P0002 são os códigos de RAISE EXCEPTION do Postgres: as travas do
+  // próprio sistema (sobrepagamento de parcela, proteção do administrador
+  // principal, permissão negada nas funções). Essas mensagens já foram
+  // escritas em português para quem opera — mostrar o texto original.
+  if (code === "P0001" || code === "P0002") {
+    return raw || "Não foi possível concluir a ação.";
+  }
+
   if (/row-level security policy/i.test(raw))
     return "Você não tem permissão para realizar esta ação.";
   if (/failed to fetch|network ?error/i.test(raw))

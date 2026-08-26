@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -72,6 +73,23 @@ type Row = {
   paid_cost_reimbursement: number | null;
   balance: number | null;
   status: string | null;
+  canceled_at: string | null;
+  cancel_reason: string | null;
+};
+
+type ReceiptRow = {
+  id: string;
+  installment_id: string;
+  received_on: string;
+  total_amount: number;
+  fee_amount: number;
+  success_fee_amount: number;
+  client_amount: number;
+  cost_reimbursement: number;
+  payment_method: string | null;
+  reference: string | null;
+  reversed_at: string | null;
+  reversal_reason: string | null;
 };
 
 const FILTERS = [
@@ -86,10 +104,11 @@ const FILTERS = [
 ];
 
 function ParcelasPage() {
-  const { profile, canWrite, roles } = useAuth();
+  const { profile, canWrite, roles, can } = useAuth();
   // Cobrança e Recebíveis só pode confirmar valores que a cliente recebeu
   // diretamente — nunca dinheiro que entra na conta do escritório.
   const isCobrancaOnly = !canWrite && roles.includes("cobranca");
+  const canReverse = can("parcelas", "cancel_or_reverse");
   const qc = useQueryClient();
   const { filtro } = Route.useSearch();
   const [filter, setFilter] = useState(() => filtro ?? "TODAS");
@@ -116,6 +135,67 @@ function ParcelasPage() {
     reference: "",
     notes: "",
     allocation_override_reason: "",
+  });
+
+  // Painel de histórico/estorno de uma parcela.
+  const [historyOf, setHistoryOf] = useState<Row | null>(null);
+  const [reversalReason, setReversalReason] = useState("");
+  const [reversing, setReversing] = useState<string | null>(null);
+  // Cancelamento da parcela em si.
+  const [cancelTarget, setCancelTarget] = useState<Row | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+
+  const { data: receipts, isLoading: receiptsLoading } = useQuery({
+    queryKey: ["parcela-recebimentos", historyOf?.id],
+    enabled: !!historyOf,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("receipts")
+        .select(
+          "id, installment_id, received_on, total_amount, fee_amount, success_fee_amount, client_amount, cost_reimbursement, payment_method, reference, reversed_at, reversal_reason",
+        )
+        .eq("installment_id", historyOf!.id)
+        .order("received_on", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as unknown as ReceiptRow[];
+    },
+  });
+
+  const reverseReceipt = useMutation({
+    mutationFn: async (receiptId: string) => {
+      if (!reversalReason.trim()) throw new Error("Informe o motivo do estorno");
+      const { error } = await supabase.rpc("reverse_receipt", {
+        _receipt_id: receiptId,
+        _reason: reversalReason.trim(),
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Recebimento estornado.");
+      setReversalReason("");
+      setReversing(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao estornar", { description: friendlyError(e) }),
+  });
+
+  const cancelInstallment = useMutation({
+    mutationFn: async () => {
+      if (!cancelTarget) throw new Error("Parcela inválida");
+      if (!cancelReason.trim()) throw new Error("Informe o motivo do cancelamento");
+      const { error } = await supabase.rpc("cancel_installment", {
+        _installment_id: cancelTarget.id,
+        _reason: cancelReason.trim(),
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Parcela cancelada.");
+      setCancelTarget(null);
+      setCancelReason("");
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
   });
 
   const { data, isLoading } = useQuery({
@@ -148,6 +228,11 @@ function ParcelasPage() {
           return false;
         const dd = daysBetween(today, r.due_date);
         if (dd < 0 || dd > limit) return false;
+      } else if (filter === "PARCIAL") {
+        // Parcela vencida com pagamento parcial passa a ter status ATRASADA
+        // (é o que importa para cobrança). Aqui o filtro olha o valor pago,
+        // então ela continua aparecendo também em "Parciais".
+        if (num(r.paid_total) <= 0.01 || num(r.balance) <= 0.01) return false;
       } else if (filter !== "TODAS" && r.status !== filter) {
         return false;
       }
@@ -284,26 +369,32 @@ function ParcelasPage() {
       if (changedAllocation && !pay.allocation_override_reason.trim())
         throw new Error("Justifique a divisão diferente da composição prevista da parcela");
 
-      const { error } = await supabase.from("receipts").insert({
-        organization_id: profile.organization_id,
-        created_by: profile.id,
-        installment_id: target.id,
-        received_on: pay.received_on,
-        total_amount: total,
-        fee_amount: feeAmount,
-        success_fee_amount: successAmount,
-        client_amount: clientAmount,
-        cost_reimbursement: costAmount,
-        receipt_destination: pay.receipt_destination,
-        client_amount_received_by_firm: clientReceivedByFirm,
-        client_amount_received_direct: clientReceivedDirect,
-        amount_received_in_firm_account: amountReceivedInFirmAccount,
-        allocation_override_reason: pay.allocation_override_reason.trim() || null,
-        bank_account_id: pay.bank_account_id || null,
-        payment_method: pay.payment_method || null,
-        reference: pay.reference.trim() || null,
-        notes: pay.notes.trim() || null,
-      });
+      const { data: createdReceipt, error } = await supabase
+        .from("receipts")
+        .insert({
+          organization_id: profile.organization_id,
+          created_by: profile.id,
+          installment_id: target.id,
+          received_on: pay.received_on,
+          total_amount: total,
+          fee_amount: feeAmount,
+          success_fee_amount: successAmount,
+          client_amount: clientAmount,
+          cost_reimbursement: costAmount,
+          receipt_destination: pay.receipt_destination,
+          client_amount_received_by_firm: clientReceivedByFirm,
+          client_amount_received_direct: clientReceivedDirect,
+          amount_received_in_firm_account: amountReceivedInFirmAccount,
+          allocation_override_reason: pay.allocation_override_reason.trim() || null,
+          bank_account_id: pay.bank_account_id || null,
+          payment_method: pay.payment_method || null,
+          reference: pay.reference.trim() || null,
+          notes: pay.notes.trim() || null,
+        })
+        // Precisa do id do recebimento para a auditoria apontar para a linha
+        // certa — antes gravava o id da parcela em table_name "receipts".
+        .select("id")
+        .single();
       if (error) throw error;
 
       await supabase.from("audit_logs").insert({
@@ -312,7 +403,7 @@ function ParcelasPage() {
         user_email: profile.email,
         action: "registrar_recebimento",
         table_name: "receipts",
-        record_id: target.id,
+        record_id: createdReceipt?.id ?? null,
         new_values: {
           total,
           parcela: target.number,
@@ -426,7 +517,7 @@ function ParcelasPage() {
                 <td>
                   <StatusBadge status={r.status ?? "A_DEFINIR"} />
                 </td>
-                <td className="p-3 text-right">
+                <td className="p-3 text-right whitespace-nowrap">
                   {(canWrite || isCobrancaOnly) &&
                     r.status !== "PAGA" &&
                     r.status !== "CANCELADA" && (
@@ -434,6 +525,24 @@ function ParcelasPage() {
                         Registrar
                       </Button>
                     )}
+                  {num(r.paid_total) > 0.01 && (
+                    <Button size="sm" variant="ghost" onClick={() => setHistoryOf(r)}>
+                      Recebimentos
+                    </Button>
+                  )}
+                  {canReverse && r.status !== "CANCELADA" && num(r.paid_total) <= 0.01 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-destructive"
+                      onClick={() => {
+                        setCancelTarget(r);
+                        setCancelReason("");
+                      }}
+                    >
+                      Cancelar
+                    </Button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -689,6 +798,148 @@ function ParcelasPage() {
             </Button>
             <Button onClick={() => register.mutate()} disabled={register.isPending}>
               {register.isPending ? "Salvando…" : "Confirmar recebimento"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Histórico de recebimentos da parcela, com estorno */}
+      <Dialog
+        open={!!historyOf}
+        onOpenChange={(v) => {
+          if (!v) {
+            setHistoryOf(null);
+            setReversing(null);
+            setReversalReason("");
+          }
+        }}
+      >
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Recebimentos da parcela</DialogTitle>
+            <DialogDescription>
+              {historyOf?.label || `Parcela ${historyOf?.number ?? ""}`} —{" "}
+              {(historyOf?.client_id && data?.clientMap.get(historyOf.client_id)) || "cliente"}
+            </DialogDescription>
+          </DialogHeader>
+
+          {receiptsLoading && <p className="text-sm text-muted-foreground">Carregando…</p>}
+          {!receiptsLoading && (receipts?.length ?? 0) === 0 && (
+            <p className="text-sm text-muted-foreground">Nenhum recebimento lançado.</p>
+          )}
+
+          <div className="space-y-3">
+            {(receipts ?? []).map((rc) => (
+              <div
+                key={rc.id}
+                className={`rounded-md border border-border p-3 ${rc.reversed_at ? "opacity-60" : ""}`}
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="num font-medium">{money(rc.total_amount)}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {dateBR(rc.received_on)}
+                    {rc.payment_method ? ` · ${rc.payment_method}` : ""}
+                    {rc.reference ? ` · ${rc.reference}` : ""}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Escritório {money(num(rc.fee_amount) + num(rc.success_fee_amount))} · Cliente{" "}
+                  {money(rc.client_amount)} · Custas {money(rc.cost_reimbursement)}
+                </p>
+
+                {rc.reversed_at ? (
+                  <p className="mt-2 text-xs font-medium text-destructive">
+                    Estornado em {dateBR(rc.reversed_at)}
+                    {rc.reversal_reason ? ` — ${rc.reversal_reason}` : ""}
+                  </p>
+                ) : (
+                  canReverse && (
+                    <div className="mt-2">
+                      {reversing === rc.id ? (
+                        <div className="space-y-2">
+                          <Label htmlFor={`rev-${rc.id}`}>Motivo do estorno</Label>
+                          <Textarea
+                            id={`rev-${rc.id}`}
+                            placeholder="Ex.: valor lançado errado, pagamento não confirmado pelo banco…"
+                            value={reversalReason}
+                            onChange={(e) => setReversalReason(e.target.value)}
+                          />
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setReversing(null);
+                                setReversalReason("");
+                              }}
+                            >
+                              Voltar
+                            </Button>
+                            <Button
+                              size="sm"
+                              disabled={reverseReceipt.isPending || !reversalReason.trim()}
+                              onClick={() => reverseReceipt.mutate(rc.id)}
+                            >
+                              {reverseReceipt.isPending ? "Estornando…" : "Confirmar estorno"}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() => {
+                            setReversing(rc.id);
+                            setReversalReason("");
+                          }}
+                        >
+                          Estornar
+                        </Button>
+                      )}
+                    </div>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setHistoryOf(null)}>
+              Fechar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Cancelamento da parcela */}
+      <Dialog open={!!cancelTarget} onOpenChange={(v) => !v && setCancelTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancelar parcela</DialogTitle>
+            <DialogDescription>
+              A parcela deixa de ser cobrada e sai dos totais em aberto. O registro continua no
+              histórico com o motivo.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="cancel-reason">Motivo do cancelamento</Label>
+            <Textarea
+              id="cancel-reason"
+              placeholder="Ex.: parcela renegociada, acordo alterado…"
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              disabled={cancelInstallment.isPending || !cancelReason.trim()}
+              onClick={() => cancelInstallment.mutate()}
+            >
+              {cancelInstallment.isPending ? "Cancelando…" : "Cancelar parcela"}
             </Button>
           </DialogFooter>
         </DialogContent>

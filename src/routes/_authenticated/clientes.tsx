@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -101,6 +102,21 @@ function ClientesPage() {
     setForm({ ...form, payer_names: form.payer_names.filter((p) => p !== name) });
   }
 
+  // Nenhum campo é obrigatório: basta preencher qualquer coisa que identifique
+  // a pessoa. Se o nome ficar em branco, o primeiro dado informado vira o nome
+  // do cliente — assim o cadastro nunca fica sem identificação nas listas e no
+  // seletor de acordos, e dá para completar depois pelo botão Editar.
+  const nameFallback =
+    form.tax_id.trim() ||
+    form.phone.trim() ||
+    form.email.trim() ||
+    form.payer_names[0]?.trim() ||
+    form.pix_key.trim() ||
+    form.account.trim() ||
+    "";
+  const resolvedName = form.name.trim() || nameFallback;
+  const canSave = resolvedName.length > 0;
+
   function exportPayers() {
     const rows: Record<string, unknown>[] = [];
     for (const c of data?.clients ?? []) {
@@ -150,14 +166,10 @@ function ClientesPage() {
       const hasPix = form.payment_kind === "pix" || form.payment_kind === "ambos";
       const hasBank = form.payment_kind === "conta" || form.payment_kind === "ambos";
 
-      if (hasPix && !form.pix_key.trim()) throw new Error("Informe a chave PIX");
-      if (hasBank && (!form.bank.trim() || !form.account.trim()))
-        throw new Error("Informe o banco e o número da conta");
-
       const { error } = await supabase.rpc(
         "create_client_with_payment_account",
         dropUndefined({
-          _name: form.name.trim(),
+          _name: resolvedName,
           _tax_id: form.tax_id.trim() || undefined,
           _phone: form.phone.trim() || undefined,
           _email: form.email.trim() || undefined,
@@ -169,7 +181,7 @@ function ClientesPage() {
           _account: hasBank ? form.account.trim() : undefined,
           _holder_name:
             form.payment_kind !== "nao_informado"
-              ? form.holder_name.trim() || form.name.trim()
+              ? form.holder_name.trim() || resolvedName
               : undefined,
           _holder_tax_id:
             form.payment_kind !== "nao_informado"
@@ -195,14 +207,10 @@ function ClientesPage() {
       const hasPix = form.payment_kind === "pix" || form.payment_kind === "ambos";
       const hasBank = form.payment_kind === "conta" || form.payment_kind === "ambos";
 
-      if (hasPix && !form.pix_key.trim()) throw new Error("Informe a chave PIX");
-      if (hasBank && (!form.bank.trim() || !form.account.trim()))
-        throw new Error("Informe o banco e o número da conta");
-
       const { error } = await supabase
         .from("clients")
         .update({
-          name: form.name.trim(),
+          name: resolvedName,
           tax_id: form.tax_id.trim() || null,
           phone: form.phone.trim() || null,
           email: form.email.trim() || null,
@@ -330,9 +338,15 @@ function ClientesPage() {
     setOpen(true);
   }
 
-  const allRows = (data?.clients ?? []).filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase()),
-  );
+  // A busca precisa achar o cliente também pelo nome de quem paga por ele e
+  // pelo CPF/CNPJ — é justamente o caso de "chegou um PIX de fulano, de quem é?".
+  const allRows = (data?.clients ?? []).filter((c) => {
+    const term = search.trim().toLowerCase();
+    if (!term) return true;
+    if (c.name.toLowerCase().includes(term)) return true;
+    if ((c.tax_id ?? "").toLowerCase().includes(term)) return true;
+    return (c.payer_names ?? []).some((p) => p.toLowerCase().includes(term));
+  });
   const [visibleCount, setVisibleCount] = useState(50);
   const rows = allRows.slice(0, visibleCount);
   const balanceOf = (id: string) =>
@@ -374,6 +388,10 @@ function ClientesPage() {
                 <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
                   <DialogHeader>
                     <DialogTitle>{editingId ? "Editar cliente" : "Novo cliente"}</DialogTitle>
+                    <DialogDescription>
+                      Preencha só o que você tem em mãos — nenhum campo é obrigatório. O que faltar
+                      pode ser completado depois.
+                    </DialogDescription>
                   </DialogHeader>
                   <div className="space-y-3">
                     <div className="space-y-2">
@@ -383,6 +401,13 @@ function ClientesPage() {
                         value={form.name}
                         onChange={(e) => setForm({ ...form, name: e.target.value })}
                       />
+                      {!form.name.trim() && nameFallback && (
+                        <p className="text-xs text-muted-foreground">
+                          Sem nome, o cliente será salvo como{" "}
+                          <strong className="text-foreground">{nameFallback}</strong>. Dá para
+                          completar depois em Editar.
+                        </p>
+                      )}
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="space-y-2">
@@ -578,7 +603,7 @@ function ClientesPage() {
                   <DialogFooter>
                     <Button
                       onClick={() => (editingId ? update.mutate() : create.mutate())}
-                      disabled={create.isPending || update.isPending || !form.name.trim()}
+                      disabled={create.isPending || update.isPending || !canSave}
                     >
                       {create.isPending || update.isPending ? "Salvando…" : "Salvar"}
                     </Button>
@@ -592,7 +617,7 @@ function ClientesPage() {
 
       <div className="mb-4 max-w-sm">
         <Input
-          placeholder="Buscar cliente…"
+          placeholder="Buscar por nome, CPF/CNPJ ou quem pagou…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />

@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -62,7 +63,8 @@ const EMPTY = {
 };
 
 function RepassesPage() {
-  const { profile, canWrite } = useAuth();
+  const { profile, canWrite, can } = useAuth();
+  const canCancel = can("repasses", "cancel_or_reverse");
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
@@ -70,6 +72,8 @@ function RepassesPage() {
     null,
   );
   const [payBank, setPayBank] = useState("");
+  const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
 
   const { data, isLoading } = useQuery({
     queryKey: ["repasses"],
@@ -101,7 +105,23 @@ function RepassesPage() {
     () => (data?.balances ?? []).find((b) => b.client_id === form.client_id),
     [data, form.client_id],
   );
-  const available = num(selectedBalance?.pending_transfer);
+
+  // Repasses já registrados mas ainda não pagos (pendente/agendado) também
+  // comprometem o saldo do cliente. A view v_client_balances só desconta os
+  // pagos — sem isto, registrar dois repasses do mesmo valor passa sem aviso
+  // e a cliente acaba recebendo em dobro.
+  const scheduledByClient = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const t of data?.transfers ?? []) {
+      if (t.status !== "pendente" && t.status !== "agendado") continue;
+      const key = t.client_id as string;
+      map.set(key, (map.get(key) ?? 0) + num(t.amount));
+    }
+    return map;
+  }, [data]);
+
+  const alreadyScheduled = form.client_id ? (scheduledByClient.get(form.client_id) ?? 0) : 0;
+  const available = num(selectedBalance?.pending_transfer) - alreadyScheduled;
   const exceeds = num(Number(form.amount)) > available + 0.01;
 
   const create = useMutation({
@@ -115,19 +135,24 @@ function RepassesPage() {
       if (form.status === "pago" && !form.bank_account_id)
         throw new Error("Selecione a conta de saída para marcar o repasse como pago");
 
-      const { error } = await supabase.from("client_transfers").insert({
-        organization_id: profile.organization_id,
-        created_by: profile.id,
-        client_id: form.client_id,
-        amount,
-        status: form.status as never,
-        scheduled_for: form.scheduled_for || null,
-        paid_on: form.status === "pago" ? form.paid_on || todayISO() : null,
-        bank_account_id: form.bank_account_id || null,
-        destination_info: form.destination_info.trim() || null,
-        notes: form.notes.trim() || null,
-        override_reason: exceeds ? form.override_reason.trim() : null,
-      });
+      const { data: createdTransfer, error } = await supabase
+        .from("client_transfers")
+        .insert({
+          organization_id: profile.organization_id,
+          created_by: profile.id,
+          client_id: form.client_id,
+          amount,
+          status: form.status as never,
+          scheduled_for: form.scheduled_for || null,
+          paid_on: form.status === "pago" ? form.paid_on || todayISO() : null,
+          bank_account_id: form.bank_account_id || null,
+          destination_info: form.destination_info.trim() || null,
+          notes: form.notes.trim() || null,
+          override_reason: exceeds ? form.override_reason.trim() : null,
+        })
+        // A auditoria precisa apontar para o repasse, não para o cliente.
+        .select("id")
+        .single();
       if (error) throw error;
 
       await supabase.from("audit_logs").insert({
@@ -136,7 +161,7 @@ function RepassesPage() {
         user_email: profile.email,
         action: "criar_repasse",
         table_name: "client_transfers",
-        record_id: form.client_id,
+        record_id: createdTransfer?.id ?? null,
         new_values: { amount, status: form.status },
       });
     },
@@ -177,6 +202,25 @@ function RepassesPage() {
     onError: (e: Error) => toast.error("Erro", { description: friendlyError(e) }),
   });
 
+  const cancelTransfer = useMutation({
+    mutationFn: async () => {
+      if (!cancelTarget) throw new Error("Repasse inválido");
+      if (!cancelReason.trim()) throw new Error("Informe o motivo do cancelamento");
+      const { error } = await supabase.rpc("cancel_transfer", {
+        _transfer_id: cancelTarget.id,
+        _reason: cancelReason.trim(),
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Repasse cancelado.");
+      setCancelTarget(null);
+      setCancelReason("");
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
+  });
+
   function onMarkPaidClick(t: { id: string; bank_account_id: string | null }) {
     if (t.bank_account_id) {
       markPaid.mutate({ id: t.id, bankAccountId: t.bank_account_id });
@@ -195,7 +239,13 @@ function RepassesPage() {
         description="Valores de terceiros recebidos pelo escritório e devidos aos clientes."
         action={
           canWrite && (
-            <Dialog open={open} onOpenChange={setOpen}>
+            <Dialog
+              open={open}
+              onOpenChange={(v) => {
+                setOpen(v);
+                if (!v) setForm(EMPTY);
+              }}
+            >
               <DialogTrigger asChild>
                 <Button>Novo repasse</Button>
               </DialogTrigger>
@@ -225,6 +275,14 @@ function RepassesPage() {
                       <p className="text-xs text-muted-foreground">
                         Saldo disponível para repasse:{" "}
                         <strong className="num">{money(available)}</strong>
+                        {alreadyScheduled > 0.01 && (
+                          <>
+                            {" "}
+                            — já descontados{" "}
+                            <strong className="num">{money(alreadyScheduled)}</strong> de repasses
+                            registrados e ainda não pagos.
+                          </>
+                        )}
                       </p>
                     )}
                   </div>
@@ -382,7 +440,7 @@ function RepassesPage() {
                   <td>
                     <TransferStatusTag status={t.status} />
                   </td>
-                  <td className="p-3 text-right">
+                  <td className="p-3 text-right whitespace-nowrap">
                     {canWrite && t.status !== "pago" && t.status !== "cancelado" && (
                       <Button
                         size="sm"
@@ -392,6 +450,22 @@ function RepassesPage() {
                         }
                       >
                         Marcar pago
+                      </Button>
+                    )}
+                    {canCancel && t.status !== "cancelado" && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive"
+                        onClick={() => {
+                          setCancelTarget({
+                            id: t.id,
+                            name: (t.clients as { name: string } | null)?.name ?? "cliente",
+                          });
+                          setCancelReason("");
+                        }}
+                      >
+                        Cancelar
                       </Button>
                     )}
                   </td>
@@ -457,6 +531,38 @@ function RepassesPage() {
               }
             >
               {markPaid.isPending ? "Salvando…" : "Confirmar pagamento"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!cancelTarget} onOpenChange={(v) => !v && setCancelTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancelar repasse</DialogTitle>
+            <DialogDescription>
+              O repasse para {cancelTarget?.name} é cancelado e o valor volta para o saldo a
+              repassar. Se já estava marcado como pago, o lançamento sai do caixa.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="cancel-tr-reason">Motivo do cancelamento</Label>
+            <Textarea
+              id="cancel-tr-reason"
+              placeholder="Ex.: valor errado, repasse registrado em duplicidade…"
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              disabled={cancelTransfer.isPending || !cancelReason.trim()}
+              onClick={() => cancelTransfer.mutate()}
+            >
+              {cancelTransfer.isPending ? "Cancelando…" : "Cancelar repasse"}
             </Button>
           </DialogFooter>
         </DialogContent>

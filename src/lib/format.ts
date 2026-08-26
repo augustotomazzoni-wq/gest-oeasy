@@ -34,11 +34,47 @@ export function addMonthsISO(iso: string, months: number): string {
   const day = base.getUTCDate();
   base.setUTCDate(1);
   base.setUTCMonth(base.getUTCMonth() + months);
-  const lastDay = new Date(
-    Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0),
-  ).getUTCDate();
+  const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0)).getUTCDate();
   base.setUTCDate(Math.min(day, lastDay));
   return base.toISOString().slice(0, 10);
+}
+
+/** Adiciona dias a uma data ISO (yyyy-MM-dd), sem deslocamento de fuso. */
+export function addDaysISO(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const base = new Date(Date.UTC(y!, (m ?? 1) - 1, (d ?? 1) + days));
+  return base.toISOString().slice(0, 10);
+}
+
+/** Início da semana (segunda-feira) que contém a data informada. */
+export function startOfWeekISO(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const base = new Date(Date.UTC(y!, (m ?? 1) - 1, d ?? 1));
+  const weekday = base.getUTCDay(); // 0 = domingo
+  const diffToMonday = weekday === 0 ? 6 : weekday - 1;
+  return addDaysISO(iso, -diffToMonday);
+}
+
+/** Fim da semana (domingo) que contém a data informada. */
+export function endOfWeekISO(iso: string): string {
+  return addDaysISO(startOfWeekISO(iso), 6);
+}
+
+export function startOfMonthISO(iso: string): string {
+  return `${iso.slice(0, 7)}-01`;
+}
+
+export function endOfMonthISO(iso: string): string {
+  const [y, m] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y!, m!, 0)).toISOString().slice(0, 10);
+}
+
+export function startOfYearISO(iso: string): string {
+  return `${iso.slice(0, 4)}-01-01`;
+}
+
+export function endOfYearISO(iso: string): string {
+  return `${iso.slice(0, 4)}-12-31`;
 }
 
 export function daysBetween(from: string, to: string): number {
@@ -51,8 +87,7 @@ export function maskTaxId(value: string | null | undefined): string {
   if (!value) return "—";
   const digits = value.replace(/\D/g, "");
   if (digits.length === 11) return `***.${digits.slice(3, 6)}.${digits.slice(6, 9)}-**`;
-  if (digits.length === 14)
-    return `**.${digits.slice(2, 5)}.${digits.slice(5, 8)}/****-**`;
+  if (digits.length === 14) return `**.${digits.slice(2, 5)}.${digits.slice(5, 8)}/****-**`;
   return value.length > 4 ? `${"*".repeat(value.length - 4)}${value.slice(-4)}` : value;
 }
 
