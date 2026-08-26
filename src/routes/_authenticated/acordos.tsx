@@ -470,6 +470,22 @@ function AcordosPage() {
     onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
   });
 
+  const deleteReceivable = useMutation({
+    mutationFn: async () => {
+      if (!deleteTarget) throw new Error("Acordo inválido");
+      const { error } = await supabase.rpc("delete_canceled_receivable", {
+        _receivable_id: deleteTarget.id,
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Acordo apagado definitivamente.");
+      setDeleteTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao apagar", { description: friendlyError(e) }),
+  });
+
   const casesForClient = (data?.cases ?? []).filter((c) => c.client_id === form.client_id);
 
   const stepValid =
