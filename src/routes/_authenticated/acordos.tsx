@@ -180,7 +180,7 @@ const EMPTY = {
 };
 
 function AcordosPage() {
-  const { profile, canWrite, can } = useAuth();
+  const { profile, canWrite, can, isMainAdmin } = useAuth();
   const canCancel = can("acordos", "cancel_or_reverse");
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -217,6 +217,7 @@ function AcordosPage() {
   }
 
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const { data, isLoading } = useQuery({
@@ -409,22 +410,22 @@ function AcordosPage() {
       // evita um acordo "fantasma" sem nenhuma parcela.
       const { error } = await supabase.rpc("create_agreement_with_schedule", {
         _client_id: form.client_id,
-        _case_id: form.case_id || null,
+        _case_id: form.case_id || undefined,
         _type: form.type,
         _status: form.status,
-        _description: form.description.trim() || null,
-        _notes: form.notes.trim() || null,
+        _description: form.description.trim() || undefined,
+        _notes: form.notes.trim() || undefined,
         _gross_amount: gross,
-        _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : null,
-        _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : null,
+        _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
+        _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
         _success_fee_amount: successFee,
         _cost_reimbursement: costs,
         _expected_firm_amount: firm,
         _expected_client_amount: client,
-        _agreement_date: form.agreement_date || null,
+        _agreement_date: form.agreement_date || undefined,
         _flow: form.flow,
         _is_estimated: form.is_estimated,
-        _manual_override_reason: overridden ? form.override_reason.trim() : null,
+        _manual_override_reason: overridden ? form.override_reason.trim() : undefined,
         _installments: schedule.map((s, index) => ({
           label: s.label,
           number: s.number,
@@ -467,6 +468,22 @@ function AcordosPage() {
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
+  });
+
+  const deleteReceivable = useMutation({
+    mutationFn: async () => {
+      if (!deleteTarget) throw new Error("Acordo inválido");
+      const { error } = await supabase.rpc("delete_canceled_receivable", {
+        _receivable_id: deleteTarget.id,
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Acordo apagado definitivamente.");
+      setDeleteTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao apagar", { description: friendlyError(e) }),
   });
 
   const casesForClient = (data?.cases ?? []).filter((c) => c.client_id === form.client_id);
@@ -1106,7 +1123,7 @@ function AcordosPage() {
               <th className="text-right">Escritório</th>
               <th className="text-right">Cliente</th>
               <th className="text-right">Recebido</th>
-              {canCancel && <th className="p-3" />}
+              {(canCancel || isMainAdmin) && <th className="p-3" />}
             </tr>
           </thead>
           <tbody>
@@ -1168,9 +1185,9 @@ function AcordosPage() {
                   <td className="num text-right">{money(r.expected_firm_amount)}</td>
                   <td className="num text-right">{money(r.expected_client_amount)}</td>
                   <td className="num text-right">{money(paid)}</td>
-                  {canCancel && (
-                    <td className="p-3 text-right whitespace-nowrap">
-                      {r.status !== "cancelado" && paid <= 0.01 && (
+                   {(canCancel || isMainAdmin) && (
+                     <td className="p-3 text-right whitespace-nowrap">
+                       {canCancel && r.status !== "cancelado" && paid <= 0.01 && (
                         <Button
                           size="sm"
                           variant="ghost"
@@ -1183,11 +1200,26 @@ function AcordosPage() {
                             setCancelReason("");
                           }}
                         >
-                          Cancelar
-                        </Button>
-                      )}
-                    </td>
-                  )}
+                           Cancelar
+                         </Button>
+                       )}
+                       {isMainAdmin && r.status === "cancelado" && paid <= 0.01 && (
+                         <Button
+                           size="sm"
+                           variant="ghost"
+                           className="text-destructive"
+                           onClick={() =>
+                             setDeleteTarget({
+                               id: r.id,
+                               name: (r.clients as { name: string } | null)?.name ?? "acordo",
+                             })
+                           }
+                         >
+                           Apagar
+                         </Button>
+                       )}
+                     </td>
+                   )}
                 </tr>
               );
             })}
@@ -1222,6 +1254,31 @@ function AcordosPage() {
               onClick={() => cancelReceivable.mutate()}
             >
               {cancelReceivable.isPending ? "Cancelando…" : "Cancelar acordo"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Apagar acordo cancelado</DialogTitle>
+            <DialogDescription>
+              O acordo de {deleteTarget?.name} e todas as suas parcelas serão apagados
+              definitivamente do sistema. Esta ação não pode ser desfeita — fica apenas o registro
+              na auditoria.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteReceivable.isPending}
+              onClick={() => deleteReceivable.mutate()}
+            >
+              {deleteReceivable.isPending ? "Apagando…" : "Apagar definitivamente"}
             </Button>
           </DialogFooter>
         </DialogContent>

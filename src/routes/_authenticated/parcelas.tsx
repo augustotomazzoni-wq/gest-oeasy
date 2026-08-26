@@ -104,7 +104,7 @@ const FILTERS = [
 ];
 
 function ParcelasPage() {
-  const { profile, canWrite, roles, can } = useAuth();
+  const { profile, canWrite, roles, can, isMainAdmin } = useAuth();
   // Cobrança e Recebíveis só pode confirmar valores que a cliente recebeu
   // diretamente — nunca dinheiro que entra na conta do escritório.
   const isCobrancaOnly = !canWrite && roles.includes("cobranca");
@@ -143,6 +143,7 @@ function ParcelasPage() {
   const [reversing, setReversing] = useState<string | null>(null);
   // Cancelamento da parcela em si.
   const [cancelTarget, setCancelTarget] = useState<Row | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Row | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const { data: receipts, isLoading: receiptsLoading } = useQuery({
@@ -196,6 +197,22 @@ function ParcelasPage() {
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
+  });
+
+  const deleteInstallment = useMutation({
+    mutationFn: async () => {
+      if (!deleteTarget) throw new Error("Parcela inválida");
+      const { error } = await supabase.rpc("delete_canceled_installment", {
+        _installment_id: deleteTarget.id,
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Parcela apagada definitivamente.");
+      setDeleteTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao apagar", { description: friendlyError(e) }),
   });
 
   const { data, isLoading } = useQuery({
@@ -541,6 +558,16 @@ function ParcelasPage() {
                       }}
                     >
                       Cancelar
+                    </Button>
+                  )}
+                  {isMainAdmin && r.status === "CANCELADA" && num(r.paid_total) <= 0.01 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-destructive"
+                      onClick={() => setDeleteTarget(r)}
+                    >
+                      Apagar
                     </Button>
                   )}
                 </td>
@@ -940,6 +967,32 @@ function ParcelasPage() {
               onClick={() => cancelInstallment.mutate()}
             >
               {cancelInstallment.isPending ? "Cancelando…" : "Cancelar parcela"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Exclusão definitiva (Administrador Principal) */}
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Apagar parcela cancelada</DialogTitle>
+            <DialogDescription>
+              A parcela {deleteTarget?.label || `nº ${deleteTarget?.number ?? ""}`} será apagada
+              definitivamente do sistema. Esta ação não pode ser desfeita — fica apenas o registro
+              na auditoria.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteInstallment.isPending}
+              onClick={() => deleteInstallment.mutate()}
+            >
+              {deleteInstallment.isPending ? "Apagando…" : "Apagar definitivamente"}
             </Button>
           </DialogFooter>
         </DialogContent>
