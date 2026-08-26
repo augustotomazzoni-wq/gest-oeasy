@@ -104,7 +104,7 @@ const FILTERS = [
 ];
 
 function ParcelasPage() {
-  const { profile, canWrite, roles, can } = useAuth();
+  const { profile, canWrite, roles, can, isMainAdmin } = useAuth();
   // Cobrança e Recebíveis só pode confirmar valores que a cliente recebeu
   // diretamente — nunca dinheiro que entra na conta do escritório.
   const isCobrancaOnly = !canWrite && roles.includes("cobranca");
@@ -143,6 +143,7 @@ function ParcelasPage() {
   const [reversing, setReversing] = useState<string | null>(null);
   // Cancelamento da parcela em si.
   const [cancelTarget, setCancelTarget] = useState<Row | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Row | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const { data: receipts, isLoading: receiptsLoading } = useQuery({
