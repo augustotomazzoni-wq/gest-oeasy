@@ -1123,7 +1123,7 @@ function AcordosPage() {
               <th className="text-right">Escritório</th>
               <th className="text-right">Cliente</th>
               <th className="text-right">Recebido</th>
-              {canCancel && <th className="p-3" />}
+              {(canCancel || isMainAdmin) && <th className="p-3" />}
             </tr>
           </thead>
           <tbody>
