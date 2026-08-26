@@ -1200,11 +1200,26 @@ function AcordosPage() {
                             setCancelReason("");
                           }}
                         >
-                          Cancelar
-                        </Button>
-                      )}
-                    </td>
-                  )}
+                           Cancelar
+                         </Button>
+                       )}
+                       {isMainAdmin && r.status === "cancelado" && paid <= 0.01 && (
+                         <Button
+                           size="sm"
+                           variant="ghost"
+                           className="text-destructive"
+                           onClick={() =>
+                             setDeleteTarget({
+                               id: r.id,
+                               name: (r.clients as { name: string } | null)?.name ?? "acordo",
+                             })
+                           }
+                         >
+                           Apagar
+                         </Button>
+                       )}
+                     </td>
+                   )}
                 </tr>
               );
             })}
