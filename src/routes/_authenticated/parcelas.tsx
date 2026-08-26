@@ -199,6 +199,22 @@ function ParcelasPage() {
     onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
   });
 
+  const deleteInstallment = useMutation({
+    mutationFn: async () => {
+      if (!deleteTarget) throw new Error("Parcela inválida");
+      const { error } = await supabase.rpc("delete_canceled_installment", {
+        _installment_id: deleteTarget.id,
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Parcela apagada definitivamente.");
+      setDeleteTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao apagar", { description: friendlyError(e) }),
+  });
+
   const { data, isLoading } = useQuery({
     queryKey: ["parcelas"],
     queryFn: async () => {
