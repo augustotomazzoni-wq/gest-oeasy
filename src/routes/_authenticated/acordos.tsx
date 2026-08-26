@@ -1258,6 +1258,31 @@ function AcordosPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Apagar acordo cancelado</DialogTitle>
+            <DialogDescription>
+              O acordo de {deleteTarget?.name} e todas as suas parcelas serão apagados
+              definitivamente do sistema. Esta ação não pode ser desfeita — fica apenas o registro
+              na auditoria.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteReceivable.isPending}
+              onClick={() => deleteReceivable.mutate()}
+            >
+              {deleteReceivable.isPending ? "Apagando…" : "Apagar definitivamente"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
