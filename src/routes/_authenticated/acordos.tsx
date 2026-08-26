@@ -1185,9 +1185,9 @@ function AcordosPage() {
                   <td className="num text-right">{money(r.expected_firm_amount)}</td>
                   <td className="num text-right">{money(r.expected_client_amount)}</td>
                   <td className="num text-right">{money(paid)}</td>
-                  {canCancel && (
-                    <td className="p-3 text-right whitespace-nowrap">
-                      {r.status !== "cancelado" && paid <= 0.01 && (
+                   {(canCancel || isMainAdmin) && (
+                     <td className="p-3 text-right whitespace-nowrap">
+                       {canCancel && r.status !== "cancelado" && paid <= 0.01 && (
                         <Button
                           size="sm"
                           variant="ghost"
