@@ -444,6 +444,7 @@ export type Database = {
           name: string;
           notes: string | null;
           organization_id: string;
+          payer_names: string[];
           phone: string | null;
           status: string;
           tax_id: string | null;
@@ -458,6 +459,7 @@ export type Database = {
           name: string;
           notes?: string | null;
           organization_id: string;
+          payer_names?: string[];
           phone?: string | null;
           status?: string;
           tax_id?: string | null;
@@ -472,6 +474,7 @@ export type Database = {
           name?: string;
           notes?: string | null;
           organization_id?: string;
+          payer_names?: string[];
           phone?: string | null;
           status?: string;
           tax_id?: string | null;
@@ -1252,6 +1255,7 @@ export type Database = {
           _holder_tax_id?: string;
           _name: string;
           _notes?: string;
+          _payer_names?: string[];
           _phone?: string;
           _pix_key?: string;
           _pix_key_type?: string;

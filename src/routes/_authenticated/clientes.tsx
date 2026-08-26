@@ -34,9 +34,10 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/useAuth";
-import { maskAccount, maskTaxId, money, num } from "@/lib/format";
+import { maskAccount, maskTaxId, money, num, todayISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
+import { downloadXlsx } from "@/lib/export-xlsx";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/clientes")({
@@ -66,6 +67,7 @@ const EMPTY_FORM = {
   phone: "",
   email: "",
   notes: "",
+  payer_names: [] as string[],
   payment_kind: "nao_informado",
   pix_key_type: "cpf_cnpj",
   pix_key: "",
@@ -83,6 +85,43 @@ function ClientesPage() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [payerInput, setPayerInput] = useState("");
+
+  function addPayer() {
+    const value = payerInput.trim();
+    if (!value || form.payer_names.includes(value)) {
+      setPayerInput("");
+      return;
+    }
+    setForm({ ...form, payer_names: [...form.payer_names, value] });
+    setPayerInput("");
+  }
+
+  function removePayer(name: string) {
+    setForm({ ...form, payer_names: form.payer_names.filter((p) => p !== name) });
+  }
+
+  function exportPayers() {
+    const rows: Record<string, unknown>[] = [];
+    for (const c of data?.clients ?? []) {
+      rows.push({
+        Pagador: c.name,
+        Cliente: c.name,
+        "CPF/CNPJ do cliente": c.tax_id ?? "",
+        Telefone: c.phone ?? "",
+      });
+      for (const payer of c.payer_names ?? []) {
+        if (!payer.trim() || payer.trim() === c.name) continue;
+        rows.push({
+          Pagador: payer,
+          Cliente: c.name,
+          "CPF/CNPJ do cliente": c.tax_id ?? "",
+          Telefone: c.phone ?? "",
+        });
+      }
+    }
+    downloadXlsx(`pagadores_${todayISO()}.xlsx`, "Pagadores", rows);
+  }
 
   const { data, isLoading } = useQuery({
     queryKey: ["clientes"],
@@ -136,6 +175,7 @@ function ClientesPage() {
             form.payment_kind !== "nao_informado"
               ? form.holder_tax_id.trim() || form.tax_id.trim() || undefined
               : undefined,
+          _payer_names: form.payer_names,
         }),
       );
       if (error) throw error;
@@ -167,6 +207,7 @@ function ClientesPage() {
           phone: form.phone.trim() || null,
           email: form.email.trim() || null,
           notes: form.notes.trim() || null,
+          payer_names: form.payer_names,
         })
         .eq("id", editingId);
       if (error) throw error;
@@ -253,6 +294,7 @@ function ClientesPage() {
     phone: string | null;
     email: string | null;
     notes: string | null;
+    payer_names: string[] | null;
   }) {
     const payment = data?.paymentAccounts.find((p) => p.client_id === c.id) as
       | {
@@ -274,6 +316,7 @@ function ClientesPage() {
       phone: c.phone ?? "",
       email: c.email ?? "",
       notes: c.notes ?? "",
+      payer_names: c.payer_names ?? [],
       payment_kind:
         hasPix && hasBank ? "ambos" : hasPix ? "pix" : hasBank ? "conta" : "nao_informado",
       pix_key_type: payment?.pix_key_type ?? "cpf_cnpj",
@@ -304,194 +347,245 @@ function ClientesPage() {
         description="Cadastro e situação financeira de cada cliente."
         action={
           canWrite && (
-            <Dialog
-              open={open}
-              onOpenChange={(v) => {
-                setOpen(v);
-                if (!v) {
-                  setEditingId(null);
-                  setForm(EMPTY_FORM);
-                }
-              }}
-            >
-              <DialogTrigger asChild>
-                <Button
-                  onClick={() => {
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={exportPayers}>
+                Exportar pagadores
+              </Button>
+              <Dialog
+                open={open}
+                onOpenChange={(v) => {
+                  setOpen(v);
+                  if (!v) {
                     setEditingId(null);
                     setForm(EMPTY_FORM);
-                  }}
-                >
-                  Novo cliente
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
-                <DialogHeader>
-                  <DialogTitle>{editingId ? "Editar cliente" : "Novo cliente"}</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-3">
-                  <div className="space-y-2">
-                    <Label htmlFor="name">Nome / Razão social</Label>
-                    <Input
-                      id="name"
-                      value={form.name}
-                      onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    />
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
+                  }
+                }}
+              >
+                <DialogTrigger asChild>
+                  <Button
+                    onClick={() => {
+                      setEditingId(null);
+                      setForm(EMPTY_FORM);
+                    }}
+                  >
+                    Novo cliente
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>{editingId ? "Editar cliente" : "Novo cliente"}</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-3">
                     <div className="space-y-2">
-                      <Label htmlFor="tax">CPF/CNPJ</Label>
+                      <Label htmlFor="name">Nome / Razão social</Label>
                       <Input
-                        id="tax"
-                        value={form.tax_id}
-                        onChange={(e) => setForm({ ...form, tax_id: e.target.value })}
+                        id="name"
+                        value={form.name}
+                        onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      />
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label htmlFor="tax">CPF/CNPJ</Label>
+                        <Input
+                          id="tax"
+                          value={form.tax_id}
+                          onChange={(e) => setForm({ ...form, tax_id: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="phone">Telefone</Label>
+                        <Input
+                          id="phone"
+                          value={form.phone}
+                          onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="email">E-mail</Label>
+                      <Input
+                        id="email"
+                        type="email"
+                        value={form.email}
+                        onChange={(e) => setForm({ ...form, email: e.target.value })}
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="phone">Telefone</Label>
-                      <Input
-                        id="phone"
-                        value={form.phone}
-                        onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                      <Label htmlFor="notes">Observações</Label>
+                      <Textarea
+                        id="notes"
+                        value={form.notes}
+                        onChange={(e) => setForm({ ...form, notes: e.target.value })}
                       />
                     </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="email">E-mail</Label>
-                    <Input
-                      id="email"
-                      type="email"
-                      value={form.email}
-                      onChange={(e) => setForm({ ...form, email: e.target.value })}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="notes">Observações</Label>
-                    <Textarea
-                      id="notes"
-                      value={form.notes}
-                      onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                    />
-                  </div>
 
-                  <div className="space-y-3 border-t border-border pt-4">
-                    <div>
-                      <p className="text-sm font-medium">Dados para recebimento e repasse</p>
+                    <div className="space-y-2">
+                      <Label htmlFor="payer">Quem costuma pagar por este cliente</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          id="payer"
+                          placeholder="Nome ou empresa que aparece no pagamento"
+                          value={payerInput}
+                          onChange={(e) => setPayerInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              addPayer();
+                            }
+                          }}
+                        />
+                        <Button type="button" variant="outline" onClick={addPayer}>
+                          Adicionar
+                        </Button>
+                      </div>
+                      {form.payer_names.length > 0 && (
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {form.payer_names.map((p) => (
+                            <span
+                              key={p}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-1 text-xs"
+                            >
+                              {p}
+                              <button
+                                type="button"
+                                onClick={() => removePayer(p)}
+                                aria-label={`Remover ${p}`}
+                                className="text-muted-foreground hover:text-destructive"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <p className="text-xs text-muted-foreground">
-                        Cadastre a chave PIX, a conta bancária ou ambas.
+                        Opcional. Use quando o pagamento costuma chegar com um nome diferente do
+                        cliente — cônjuge, familiar ou empresa. Ajuda a identificar de quem é um
+                        pagamento quando o nome não bate com o cliente.
                       </p>
                     </div>
-                    <div className="space-y-2">
-                      <Label>Forma de recebimento</Label>
-                      <Select
-                        value={form.payment_kind}
-                        onValueChange={(v) => setForm({ ...form, payment_kind: v })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="nao_informado">Ainda não informado</SelectItem>
-                          <SelectItem value="pix">PIX</SelectItem>
-                          <SelectItem value="conta">Conta bancária</SelectItem>
-                          <SelectItem value="ambos">PIX e conta bancária</SelectItem>
-                        </SelectContent>
-                      </Select>
+
+                    <div className="space-y-3 border-t border-border pt-4">
+                      <div>
+                        <p className="text-sm font-medium">Dados para recebimento e repasse</p>
+                        <p className="text-xs text-muted-foreground">
+                          Cadastre a chave PIX, a conta bancária ou ambas.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Forma de recebimento</Label>
+                        <Select
+                          value={form.payment_kind}
+                          onValueChange={(v) => setForm({ ...form, payment_kind: v })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="nao_informado">Ainda não informado</SelectItem>
+                            <SelectItem value="pix">PIX</SelectItem>
+                            <SelectItem value="conta">Conta bancária</SelectItem>
+                            <SelectItem value="ambos">PIX e conta bancária</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {(form.payment_kind === "pix" || form.payment_kind === "ambos") && (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>Tipo da chave PIX</Label>
+                            <Select
+                              value={form.pix_key_type}
+                              onValueChange={(v) => setForm({ ...form, pix_key_type: v })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="cpf_cnpj">CPF/CNPJ</SelectItem>
+                                <SelectItem value="telefone">Telefone</SelectItem>
+                                <SelectItem value="email">E-mail</SelectItem>
+                                <SelectItem value="aleatoria">Chave aleatória</SelectItem>
+                                <SelectItem value="outro">Outro</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="pix">Chave PIX</Label>
+                            <Input
+                              id="pix"
+                              value={form.pix_key}
+                              onChange={(e) => setForm({ ...form, pix_key: e.target.value })}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {(form.payment_kind === "conta" || form.payment_kind === "ambos") && (
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div className="space-y-2 sm:col-span-1">
+                            <Label htmlFor="bank">Banco</Label>
+                            <Input
+                              id="bank"
+                              value={form.bank}
+                              onChange={(e) => setForm({ ...form, bank: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="branch">Agência</Label>
+                            <Input
+                              id="branch"
+                              value={form.branch}
+                              onChange={(e) => setForm({ ...form, branch: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="account">Número da conta</Label>
+                            <Input
+                              id="account"
+                              value={form.account}
+                              onChange={(e) => setForm({ ...form, account: e.target.value })}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {form.payment_kind !== "nao_informado" && (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label htmlFor="holder">Titular</Label>
+                            <Input
+                              id="holder"
+                              placeholder={form.name || "Nome do titular"}
+                              value={form.holder_name}
+                              onChange={(e) => setForm({ ...form, holder_name: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="holder-tax">CPF/CNPJ do titular</Label>
+                            <Input
+                              id="holder-tax"
+                              placeholder={form.tax_id || "CPF/CNPJ"}
+                              value={form.holder_tax_id}
+                              onChange={(e) => setForm({ ...form, holder_tax_id: e.target.value })}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
-
-                    {(form.payment_kind === "pix" || form.payment_kind === "ambos") && (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-2">
-                          <Label>Tipo da chave PIX</Label>
-                          <Select
-                            value={form.pix_key_type}
-                            onValueChange={(v) => setForm({ ...form, pix_key_type: v })}
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="cpf_cnpj">CPF/CNPJ</SelectItem>
-                              <SelectItem value="telefone">Telefone</SelectItem>
-                              <SelectItem value="email">E-mail</SelectItem>
-                              <SelectItem value="aleatoria">Chave aleatória</SelectItem>
-                              <SelectItem value="outro">Outro</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="pix">Chave PIX</Label>
-                          <Input
-                            id="pix"
-                            value={form.pix_key}
-                            onChange={(e) => setForm({ ...form, pix_key: e.target.value })}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {(form.payment_kind === "conta" || form.payment_kind === "ambos") && (
-                      <div className="grid gap-3 sm:grid-cols-3">
-                        <div className="space-y-2 sm:col-span-1">
-                          <Label htmlFor="bank">Banco</Label>
-                          <Input
-                            id="bank"
-                            value={form.bank}
-                            onChange={(e) => setForm({ ...form, bank: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="branch">Agência</Label>
-                          <Input
-                            id="branch"
-                            value={form.branch}
-                            onChange={(e) => setForm({ ...form, branch: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="account">Número da conta</Label>
-                          <Input
-                            id="account"
-                            value={form.account}
-                            onChange={(e) => setForm({ ...form, account: e.target.value })}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {form.payment_kind !== "nao_informado" && (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-2">
-                          <Label htmlFor="holder">Titular</Label>
-                          <Input
-                            id="holder"
-                            placeholder={form.name || "Nome do titular"}
-                            value={form.holder_name}
-                            onChange={(e) => setForm({ ...form, holder_name: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="holder-tax">CPF/CNPJ do titular</Label>
-                          <Input
-                            id="holder-tax"
-                            placeholder={form.tax_id || "CPF/CNPJ"}
-                            value={form.holder_tax_id}
-                            onChange={(e) => setForm({ ...form, holder_tax_id: e.target.value })}
-                          />
-                        </div>
-                      </div>
-                    )}
                   </div>
-                </div>
-                <DialogFooter>
-                  <Button
-                    onClick={() => (editingId ? update.mutate() : create.mutate())}
-                    disabled={create.isPending || update.isPending || !form.name.trim()}
-                  >
-                    {create.isPending || update.isPending ? "Salvando…" : "Salvar"}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+                  <DialogFooter>
+                    <Button
+                      onClick={() => (editingId ? update.mutate() : create.mutate())}
+                      disabled={create.isPending || update.isPending || !form.name.trim()}
+                    >
+                      {create.isPending || update.isPending ? "Salvando…" : "Salvar"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
           )
         }
       />
@@ -538,7 +632,14 @@ function ClientesPage() {
               const payment = paymentOf(c.id);
               return (
                 <tr key={c.id} className="border-b border-border/60 last:border-0">
-                  <td className="p-3 font-medium">{c.name}</td>
+                  <td className="p-3 font-medium">
+                    {c.name}
+                    {(c.payer_names ?? []).length > 0 && (
+                      <span className="block text-xs font-normal text-muted-foreground">
+                        Também paga: {(c.payer_names ?? []).join(", ")}
+                      </span>
+                    )}
+                  </td>
                   <td>{maskTaxId(c.tax_id)}</td>
                   <td className="text-muted-foreground">{c.phone || c.email || "—"}</td>
                   <td className="text-muted-foreground">
