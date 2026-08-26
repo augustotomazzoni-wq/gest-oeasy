@@ -180,7 +180,7 @@ const EMPTY = {
 };
 
 function AcordosPage() {
-  const { profile, canWrite, can } = useAuth();
+  const { profile, canWrite, can, isMainAdmin } = useAuth();
   const canCancel = can("acordos", "cancel_or_reverse");
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -217,6 +217,7 @@ function AcordosPage() {
   }
 
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const { data, isLoading } = useQuery({
