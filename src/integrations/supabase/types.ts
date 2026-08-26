@@ -1413,6 +1413,14 @@ export type Database = {
         Returns: string
       }
       current_org_id: { Args: never; Returns: string }
+      delete_canceled_installment: {
+        Args: { _installment_id: string }
+        Returns: undefined
+      }
+      delete_canceled_receivable: {
+        Args: { _receivable_id: string }
+        Returns: undefined
+      }
       has_permission: {
         Args: { _action: string; _module: string; _user_id: string }
         Returns: boolean
