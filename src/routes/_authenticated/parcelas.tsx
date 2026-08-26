@@ -560,6 +560,16 @@ function ParcelasPage() {
                       Cancelar
                     </Button>
                   )}
+                  {isMainAdmin && r.status === "CANCELADA" && num(r.paid_total) <= 0.01 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-destructive"
+                      onClick={() => setDeleteTarget(r)}
+                    >
+                      Apagar
+                    </Button>
+                  )}
                 </td>
               </tr>
             ))}
