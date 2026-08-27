@@ -35,7 +35,62 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/useAuth";
 import { friendlyError } from "@/lib/errors";
+import {
+  ALL_FIELDS,
+  FieldFilter,
+  makeFieldMatcher,
+  type FilterField,
+} from "@/components/FieldFilter";
 import { toast } from "sonner";
+
+// As colunas usadas na tabela ficam tipadas; o índice aberto no fim deixa o
+// filtro alcançar também os campos que vieram do Advbox.
+type CaseRow = {
+  id: string;
+  client_id: string;
+  case_number: string | null;
+  opposing_party: string | null;
+  court: string | null;
+  practice_area: string | null;
+  action_type: string | null;
+  responsible_lawyer: string | null;
+  notes: string | null;
+  clients: { name: string } | null;
+  [column: string]: unknown;
+};
+
+/** Texto de uma coluna qualquer do processo, sem quebrar se ela vier nula. */
+const txt =
+  (col: string) =>
+  (c: CaseRow): string =>
+    String(c[col] ?? "");
+
+// Todos os campos do processo ficam pesquisáveis, inclusive os que vieram do
+// Advbox e não aparecem na tabela.
+const CASE_FIELDS: FilterField<CaseRow>[] = [
+  { key: "cliente", label: "Cliente", get: (c) => c.clients?.name ?? "" },
+  { key: "case_number", label: "Nº do processo", get: txt("case_number") },
+  { key: "opposing_party", label: "Parte contrária", get: txt("opposing_party") },
+  { key: "court", label: "Tribunal / vara", get: txt("court") },
+  { key: "practice_area", label: "Área do direito", get: txt("practice_area") },
+  { key: "action_type", label: "Tipo de ação", get: txt("action_type") },
+  { key: "responsible_lawyer", label: "Advogado responsável", get: txt("responsible_lawyer") },
+  { key: "action_group", label: "Grupo de ação", get: txt("action_group") },
+  { key: "judicial_phase", label: "Fase judicial", get: txt("judicial_phase") },
+  { key: "stage", label: "Etapa", get: txt("stage") },
+  { key: "protocol_number", label: "Nº do protocolo", get: txt("protocol_number") },
+  { key: "original_case", label: "Processo originário", get: txt("original_case") },
+  { key: "folder", label: "Pasta / caso", get: txt("folder") },
+  { key: "case_year", label: "Ano", get: txt("case_year") },
+  { key: "segment", label: "Segmento", get: txt("segment") },
+  { key: "county", label: "Comarca", get: txt("county") },
+  { key: "court_division", label: "Vara", get: txt("court_division") },
+  { key: "case_result", label: "Resultado", get: txt("case_result") },
+  { key: "contingency", label: "Contingenciamento", get: txt("contingency") },
+  { key: "last_movement", label: "Último andamento", get: txt("last_movement") },
+  { key: "status", label: "Situação", get: txt("status") },
+  { key: "notes", label: "Observações", get: txt("notes") },
+];
 
 export const Route = createFileRoute("/_authenticated/processos")({
   head: () => ({
@@ -74,6 +129,7 @@ function ProcessosPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [field, setField] = useState<string>(ALL_FIELDS);
   const [form, setForm] = useState(EMPTY);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -189,15 +245,8 @@ function ProcessosPage() {
     setOpen(true);
   }
 
-  const rows = (data?.cases ?? []).filter((c) => {
-    const term = search.toLowerCase();
-    return (
-      !term ||
-      (c.case_number ?? "").toLowerCase().includes(term) ||
-      (c.opposing_party ?? "").toLowerCase().includes(term) ||
-      ((c.clients as { name: string } | null)?.name ?? "").toLowerCase().includes(term)
-    );
-  });
+  const matches = makeFieldMatcher(CASE_FIELDS, field, search);
+  const rows = ((data?.cases ?? []) as unknown as CaseRow[]).filter(matches);
 
   return (
     <>
@@ -322,13 +371,18 @@ function ProcessosPage() {
         }
       />
 
-      <div className="mb-4 max-w-sm">
-        <Input
-          placeholder="Buscar por processo, cliente ou parte contrária…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
+      <FieldFilter
+        fields={CASE_FIELDS}
+        fieldKey={field}
+        onFieldChange={setField}
+        term={search}
+        onTermChange={setSearch}
+        placeholder="Buscar em qualquer campo do processo…"
+      />
+
+      <p className="mb-2 text-xs text-muted-foreground">
+        {rows.length} processo(s) {search ? "encontrado(s)" : "cadastrado(s)"}
+      </p>
 
       <div className="panel overflow-x-auto">
         <table className="w-full text-sm">

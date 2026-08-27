@@ -39,7 +39,57 @@ import { maskAccount, maskTaxId, money, num, todayISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
 import { downloadXlsx } from "@/lib/export-xlsx";
+import {
+  ALL_FIELDS,
+  FieldFilter,
+  makeFieldMatcher,
+  type FilterField,
+} from "@/components/FieldFilter";
 import { toast } from "sonner";
+
+// As colunas usadas na tela ficam tipadas; o índice aberto no fim deixa o
+// filtro alcançar também os campos que vieram do Advbox.
+type ClientRow = {
+  id: string;
+  name: string;
+  tax_id: string | null;
+  phone: string | null;
+  email: string | null;
+  notes: string | null;
+  payer_names: string[] | null;
+  [column: string]: unknown;
+};
+
+/** Texto de uma coluna qualquer do cliente, sem quebrar se ela vier nula. */
+const txt =
+  (col: string) =>
+  (c: ClientRow): string =>
+    String(c[col] ?? "");
+
+const CLIENT_FIELDS: FilterField<ClientRow>[] = [
+  { key: "name", label: "Nome", get: (c) => c.name },
+  { key: "tax_id", label: "CPF / CNPJ", get: txt("tax_id") },
+  { key: "payer_names", label: "Quem paga (pagadores)", get: (c) => (c.payer_names ?? []).join(" ") },
+  { key: "rg", label: "RG", get: txt("rg") },
+  { key: "phone", label: "Celular", get: txt("phone") },
+  { key: "phone_secondary", label: "Telefone fixo", get: txt("phone_secondary") },
+  { key: "email", label: "E-mail", get: txt("email") },
+  { key: "city", label: "Cidade", get: txt("city") },
+  { key: "state", label: "Estado", get: txt("state") },
+  { key: "district", label: "Bairro", get: txt("district") },
+  { key: "address", label: "Endereço", get: txt("address") },
+  { key: "zip_code", label: "CEP", get: txt("zip_code") },
+  { key: "occupation", label: "Profissão", get: txt("occupation") },
+  { key: "marital_status", label: "Estado civil", get: txt("marital_status") },
+  { key: "mother_name", label: "Nome da mãe", get: txt("mother_name") },
+  { key: "birth_date", label: "Data de nascimento", get: txt("birth_date") },
+  { key: "pis_pasep", label: "PIS / PASEP", get: txt("pis_pasep") },
+  { key: "ctps", label: "CTPS", get: txt("ctps") },
+  { key: "cid", label: "CID", get: txt("cid") },
+  { key: "gender", label: "Sexo", get: txt("gender") },
+  { key: "source", label: "Origem", get: txt("source") },
+  { key: "notes", label: "Observações", get: txt("notes") },
+];
 
 export const Route = createFileRoute("/_authenticated/clientes")({
   head: () => ({
@@ -80,7 +130,9 @@ const EMPTY_FORM = {
 };
 
 function ClientesPage() {
-  const { profile, canWrite } = useAuth();
+  const { profile, canWrite, can } = useAuth();
+  const canExport = can("clientes", "export");
+  const [field, setField] = useState<string>(ALL_FIELDS);
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -338,15 +390,10 @@ function ClientesPage() {
     setOpen(true);
   }
 
-  // A busca precisa achar o cliente também pelo nome de quem paga por ele e
-  // pelo CPF/CNPJ — é justamente o caso de "chegou um PIX de fulano, de quem é?".
-  const allRows = (data?.clients ?? []).filter((c) => {
-    const term = search.trim().toLowerCase();
-    if (!term) return true;
-    if (c.name.toLowerCase().includes(term)) return true;
-    if ((c.tax_id ?? "").toLowerCase().includes(term)) return true;
-    return (c.payer_names ?? []).some((p) => p.toLowerCase().includes(term));
-  });
+  // Com "Todos os campos" a busca varre inclusive o nome de quem paga pelo
+  // cliente — é o caso de "chegou um PIX de fulano, de quem é?".
+  const matches = makeFieldMatcher(CLIENT_FIELDS, field, search);
+  const allRows = ((data?.clients ?? []) as unknown as ClientRow[]).filter(matches);
   const [visibleCount, setVisibleCount] = useState(50);
   const rows = allRows.slice(0, visibleCount);
   const balanceOf = (id: string) =>
@@ -362,9 +409,14 @@ function ClientesPage() {
         action={
           canWrite && (
             <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={exportPayers}>
-                Exportar pagadores
-              </Button>
+              {/* Exportar leva CPF, endereço e telefone da base inteira para
+                  fora do sistema — por isso é uma permissão que o
+                  Administrador liga por perfil, não um botão para todos. */}
+              {canExport && (
+                <Button variant="outline" onClick={exportPayers}>
+                  Exportar pagadores
+                </Button>
+              )}
               <Dialog
                 open={open}
                 onOpenChange={(v) => {
@@ -615,13 +667,18 @@ function ClientesPage() {
         }
       />
 
-      <div className="mb-4 max-w-sm">
-        <Input
-          placeholder="Buscar por nome, CPF/CNPJ ou quem pagou…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
+      <FieldFilter
+        fields={CLIENT_FIELDS}
+        fieldKey={field}
+        onFieldChange={setField}
+        term={search}
+        onTermChange={setSearch}
+        placeholder="Buscar por nome, CPF/CNPJ ou quem pagou…"
+      />
+
+      <p className="mb-2 text-xs text-muted-foreground">
+        {allRows.length} cliente(s) {search ? "encontrado(s)" : "cadastrado(s)"}
+      </p>
 
       <div className="panel overflow-x-auto">
         <table className="w-full text-sm">

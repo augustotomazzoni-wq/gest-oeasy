@@ -42,7 +42,9 @@ export const Route = createFileRoute("/_authenticated/importar")({
 });
 
 function ImportarPage() {
-  const { profile, canWrite } = useAuth();
+  const { profile, canWrite, can } = useAuth();
+  const canExportClients = can("clientes", "export");
+  const canExportCases = can("processos", "export");
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [parsed, setParsed] = useState<ParsedWorkbook | null>(null);
@@ -547,20 +549,26 @@ function ImportarPage() {
         description="Traga cadastros de clientes e processos, ou baixe a base atual no mesmo formato."
         action={
           <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              disabled={exporting !== null}
-              onClick={() => void exportar("clientes")}
-            >
-              {exporting === "clientes" ? "Gerando…" : "Exportar clientes"}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={exporting !== null}
-              onClick={() => void exportar("processos")}
-            >
-              {exporting === "processos" ? "Gerando…" : "Exportar processos"}
-            </Button>
+            {/* Cada exportação segue a permissão do seu próprio módulo: quem
+                não pode exportar clientes não baixa a planilha de clientes. */}
+            {canExportClients && (
+              <Button
+                variant="outline"
+                disabled={exporting !== null}
+                onClick={() => void exportar("clientes")}
+              >
+                {exporting === "clientes" ? "Gerando…" : "Exportar clientes"}
+              </Button>
+            )}
+            {canExportCases && (
+              <Button
+                variant="outline"
+                disabled={exporting !== null}
+                onClick={() => void exportar("processos")}
+              >
+                {exporting === "processos" ? "Gerando…" : "Exportar processos"}
+              </Button>
+            )}
           </div>
         }
       />

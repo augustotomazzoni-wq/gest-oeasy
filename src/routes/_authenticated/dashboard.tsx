@@ -51,9 +51,13 @@ const MONTH_NAMES = [
   "Dezembro",
 ];
 
-type PeriodType = "dia" | "semana" | "mes" | "ano";
+type PeriodType = "dia" | "semana" | "mes" | "ano" | "personalizado";
 
-function periodRange(type: PeriodType, anchor: string): { start: string; end: string } {
+function periodRange(
+  type: PeriodType,
+  anchor: string,
+  custom?: { start: string; end: string },
+): { start: string; end: string } {
   switch (type) {
     case "dia":
       return { start: anchor, end: anchor };
@@ -61,17 +65,29 @@ function periodRange(type: PeriodType, anchor: string): { start: string; end: st
       return { start: startOfWeekISO(anchor), end: endOfWeekISO(anchor) };
     case "ano":
       return { start: startOfYearISO(anchor), end: endOfYearISO(anchor) };
+    case "personalizado": {
+      // Datas invertidas são um erro de digitação comum — troca em vez de
+      // devolver um intervalo vazio e um dashboard todo zerado.
+      const s = custom?.start || anchor;
+      const e = custom?.end || anchor;
+      return s <= e ? { start: s, end: e } : { start: e, end: s };
+    }
     case "mes":
     default:
       return { start: startOfMonthISO(anchor), end: endOfMonthISO(anchor) };
   }
 }
 
-function periodLabel(type: PeriodType, anchor: string): string {
-  const { start, end } = periodRange(type, anchor);
+function periodLabel(
+  type: PeriodType,
+  anchor: string,
+  custom?: { start: string; end: string },
+): string {
+  const { start, end } = periodRange(type, anchor, custom);
   if (type === "dia") return dateBR(anchor);
   if (type === "semana") return `${dateBR(start)} – ${dateBR(end)}`;
   if (type === "ano") return anchor.slice(0, 4);
+  if (type === "personalizado") return `${dateBR(start)} – ${dateBR(end)}`;
   const [y, m] = anchor.split("-").map(Number);
   return `${MONTH_NAMES[(m ?? 1) - 1]} de ${y}`;
 }
@@ -167,9 +183,13 @@ function usePeriodData(start: string, end: string) {
     queryKey: ["dashboard-period", start, end],
     queryFn: async () => {
       const [receipts, txs] = await Promise.all([
+        // O cliente vem junto (recebimento → parcela → acordo) para dar a
+        // contagem de clientes que efetivamente pagaram algo no período.
         supabase
           .from("receipts")
-          .select("fee_amount, success_fee_amount, client_amount_received_by_firm, received_on")
+          .select(
+            "fee_amount, success_fee_amount, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id))",
+          )
           .gte("received_on", start)
           .lte("received_on", end),
         supabase
@@ -184,6 +204,15 @@ function usePeriodData(start: string, end: string) {
       return { receipts: receipts.data ?? [], txs: txs.data ?? [] };
     },
   });
+}
+
+/** Extrai o id do cliente da estrutura aninhada que o PostgREST devolve. */
+function clientIdOf(row: unknown): string | null {
+  const inst = (row as { installments?: unknown }).installments;
+  const one = Array.isArray(inst) ? inst[0] : inst;
+  const recv = (one as { legal_receivables?: unknown } | undefined)?.legal_receivables;
+  const rec = Array.isArray(recv) ? recv[0] : recv;
+  return (rec as { client_id?: string } | undefined)?.client_id ?? null;
 }
 
 type DashboardLink = "/caixa" | "/repasses" | "/parcelas" | "/acordos";
@@ -235,7 +264,10 @@ function Dashboard() {
 
   const [periodType, setPeriodType] = useState<PeriodType>("mes");
   const [anchor, setAnchor] = useState(today);
-  const { start: periodStart, end: periodEnd } = periodRange(periodType, anchor);
+  const [customStart, setCustomStart] = useState(startOfMonthISO(today));
+  const [customEnd, setCustomEnd] = useState(today);
+  const custom = { start: customStart, end: customEnd };
+  const { start: periodStart, end: periodEnd } = periodRange(periodType, anchor, custom);
   const { data: periodData, isLoading: periodLoading } = usePeriodData(periodStart, periodEnd);
 
   if (isLoading) {
@@ -270,6 +302,20 @@ function Dashboard() {
   const periodProfit = periodFirmRevenue - periodExpenses;
   const activeCases = d.activeCasesCount;
   const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
+
+  // Quantos clientes distintos efetivamente pagaram alguma coisa no período —
+  // é a base tanto do custo por cliente quanto da receita média por cliente.
+  // Conta o cliente uma vez só, mesmo que ele tenha pago cinco parcelas.
+  const payingClients = new Set<string>();
+  for (const r of periodData?.receipts ?? []) {
+    const id = clientIdOf(r);
+    if (id) payingClients.add(id);
+  }
+  const payingCount = payingClients.size;
+  // Custo de captação: quanto o escritório gastou para cada cliente que pagou.
+  const costPerClient = payingCount > 0 ? periodExpenses / payingCount : 0;
+  // Ticket médio: quanto o escritório faturou, em média, por cliente pagante.
+  const revenuePerClient = payingCount > 0 ? periodFirmRevenue / payingCount : 0;
 
   const totalBank = d.banks.reduce((s, b) => s + num(b.balance as number), 0);
   const firmRevenue = d.installments.reduce(
@@ -401,6 +447,7 @@ function Dashboard() {
                 ["semana", "Semana"],
                 ["mes", "Mês"],
                 ["ano", "Ano"],
+                ["personalizado", "Personalizado"],
               ] as const
             ).map(([key, label]) => (
               <Button
@@ -412,35 +459,57 @@ function Dashboard() {
                 {label}
               </Button>
             ))}
-            <div className="flex items-center gap-1">
-              <Button
-                size="sm"
-                variant="outline"
-                aria-label="Período anterior"
-                onClick={() => setAnchor((a) => shiftAnchor(periodType, a, -1))}
-              >
-                ‹
-              </Button>
-              <Input
-                type="date"
-                className="w-40"
-                aria-label="Data de referência do período"
-                value={anchor}
-                onChange={(e) => setAnchor(e.target.value || today)}
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                aria-label="Próximo período"
-                onClick={() => setAnchor((a) => shiftAnchor(periodType, a, 1))}
-              >
-                ›
-              </Button>
-            </div>
+            {periodType === "personalizado" ? (
+              <div className="flex flex-wrap items-center gap-1">
+                <Input
+                  type="date"
+                  className="w-40"
+                  aria-label="Data inicial"
+                  value={customStart}
+                  onChange={(e) => setCustomStart(e.target.value)}
+                />
+                <span className="text-sm text-muted-foreground">até</span>
+                <Input
+                  type="date"
+                  className="w-40"
+                  aria-label="Data final"
+                  value={customEnd}
+                  onChange={(e) => setCustomEnd(e.target.value)}
+                />
+              </div>
+            ) : (
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label="Período anterior"
+                  onClick={() => setAnchor((a) => shiftAnchor(periodType, a, -1))}
+                >
+                  ‹
+                </Button>
+                <Input
+                  type="date"
+                  className="w-40"
+                  aria-label="Data de referência do período"
+                  value={anchor}
+                  onChange={(e) => setAnchor(e.target.value || today)}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label="Próximo período"
+                  onClick={() => setAnchor((a) => shiftAnchor(periodType, a, 1))}
+                >
+                  ›
+                </Button>
+              </div>
+            )}
           </div>
         </div>
 
-        <p className="num mt-3 text-sm text-muted-foreground">{periodLabel(periodType, anchor)}</p>
+        <p className="num mt-3 text-sm text-muted-foreground">
+          {periodLabel(periodType, anchor, custom)}
+        </p>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="panel p-4">
@@ -472,6 +541,36 @@ function Dashboard() {
               {periodLoading ? "…" : money(profitPerCase)}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">{activeCases} processo(s) ativo(s)</p>
+          </div>
+        </div>
+
+        {/* Indicadores por cliente pagante: a base dos dois é a mesma — quantos
+            clientes distintos colocaram dinheiro no escritório no período. */}
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Clientes que pagaram</p>
+            <p className="num mt-1 text-xl font-semibold">{periodLoading ? "…" : payingCount}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Clientes distintos com recebimento no período
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Custo por cliente</p>
+            <p className="num mt-1 text-xl font-semibold text-destructive">
+              {periodLoading ? "…" : payingCount > 0 ? money(costPerClient) : "—"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Despesas do período ÷ clientes que pagaram
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Receita média por cliente</p>
+            <p className="num mt-1 text-xl font-semibold text-success">
+              {periodLoading ? "…" : payingCount > 0 ? money(revenuePerClient) : "—"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Receita do escritório ÷ clientes que pagaram
+            </p>
           </div>
         </div>
 

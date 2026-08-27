@@ -1,75 +1,143 @@
 # Atualização de 27/08/2026
 
-Inclui tudo das rodadas anteriores. Se você não aplicou os zips anteriores, use só este.
+## Como aplicar — 2 passos
 
-## Como aplicar
+### Passo 1: o banco (faça primeiro)
 
-**1. Banco (Supabase → SQL Editor → Run)** — nesta ordem:
+Abra o **Lovable → botão "More" → Cloud → SQL editor** (é o de dentro do
+Lovable mesmo, **não** o site supabase.com).
 
-Confirme primeiro o que já rodou:
+Cole o conteúdo do arquivo:
 
-```sql
-select column_name from information_schema.columns
-where table_name = 'clients' and column_name = 'payer_names';
+```
+supabase/migrations/20260827200000_recorrencia_pagamentos_e_exportacao.sql
 ```
 
-- **Se voltar vazio:** rode antes `20260824090000_...`, `20260824120000_...`, `20260825120000_...`
-- **Depois**, rode os três novos **nesta ordem**:
-  1. `20260826120000_correcoes_varredura.sql`
-  2. `20260826150000_estorno_e_cancelamento.sql`
-  3. `20260827100000_campos_advbox.sql`
+e clique em **Run**. Se aparecer o aviso "Confirm destructive operation",
+clique em **Run anyway** — é só porque o texto contém a palavra DELETE dentro
+de uma função; nada é apagado.
 
-**2. Código:** copie os arquivos por cima da pasta clonada e faça commit + push.
+### Passo 2: o código
 
-**3. Importe seus dados:** abra a tela **Importar e Exportar** e envie os dois arquivos do Advbox (um de cada vez). Não precisa mais de script SQL.
+Copie as pastas `src` e `supabase` deste pacote por cima da sua pasta clonada
+do GitHub (substituindo os arquivos) e faça commit + push.
 
----
-
-## Novidades desta rodada
-
-### Campos novos, iguais aos do Advbox
-
-**Clientes** ganharam: RG, data de nascimento, estado civil, PIS/PASEP, CTPS, CID, profissão, sexo, telefone fixo, país, estado, cidade, endereço, bairro, CEP, nome da mãe e origem.
-
-**Processos** ganharam: grupo de ação, fase judicial, etapa, número do protocolo, processo originário, pasta/caso, ano, data do requerimento, segmento, comarca, vara, data do fechamento, data do trânsito em julgado, data do arquivamento, resultado, valor da causa, valor dos honorários, % de honorários, contingenciamento e último andamento.
-
-Todos são opcionais — preencha só o que interessar.
-
-### Importação que entende o formato do Advbox
-
-A tela reconhece sozinha qual planilha você enviou, sem precisar escolher nada:
-
-- **Clientes do Advbox** — cria os novos e **atualiza os que já existem**, casando pelo CPF/CNPJ (ou pelo nome, quando não há CPF).
-- **Processos do Advbox** — casa pelo número do processo; sem número, casa por cliente + parte contrária. Se o cliente ainda não existir, é criado a partir do nome e CPF que vêm no próprio arquivo, com um aviso para completar depois.
-- **Planilha de controle de recebíveis** (a antiga, com abas "Clientes" e "Parcelas a Receber") continua funcionando como antes.
-
-Antes de gravar, mostra uma prévia com a contagem, os avisos e as primeiras linhas. Nada é gravado até você confirmar.
-
-**Testado com seus arquivos reais:**
-- Clientes: 206 linhas → 205 importáveis (avisou 1 cadastro repetido: MIRIAM FUSCO DE SOUZA)
-- Processos: 170 linhas → 169 importáveis (avisou 1 número de processo repetido)
-- Avisa também: 8 clientes sem CPF e 50 processos sem número
-
-### Exportação no mesmo formato
-
-Dois botões no topo da tela: **Exportar clientes** e **Exportar processos**. Geram um `.xlsx` com exatamente as mesmas colunas do Advbox, na mesma ordem — então o arquivo que você baixa daqui pode ser reimportado aqui (ou levado para o Advbox) sem ajuste nenhum.
-
-Valores saem formatados como no Advbox (`R$39.111,96`), datas em `dd/mm/aaaa`, e o cliente do processo sai como `NOME (CPF)`.
+O build voltou a funcionar (veja "Correção do build" no fim).
 
 ---
 
-## Já incluído (rodadas anteriores)
+## O que mudou
 
-- **Estorno e cancelamento** de recebimento, parcela, acordo e repasse — com motivo obrigatório e histórico preservado.
-- **Redefinir senha** funcionando de verdade.
-- **Sucumbência**: você escolhe se está dentro ou fora do valor bruto; o total aparece antes de confirmar.
-- **Tabela de acordos** com a coluna "Total a receber" e o cronograma que se recalcula sozinho.
-- **Dashboard** com filtro Dia/Semana/Mês/Ano e lucro por processo ativo.
-- **Cadastro de cliente** sem nenhum campo obrigatório, com campo de pagadores e busca por quem pagou.
-- Correções: importação quebrada, mensagens de erro engolidas, repasse em dobro, caixa contando dinheiro da cliente como receita, parcela vencida sumindo dos atrasos, formulários com dados antigos, duas falhas de permissão.
+### 1. Dashboard: período personalizado
+
+Além de Dia / Semana / Mês / Ano, agora existe o botão **Personalizado**, com
+data de início e data de fim. Se você inverter as datas por engano, o sistema
+corrige sozinho em vez de zerar tudo.
+
+### 2. Dashboard: custo por cliente e receita média por cliente
+
+Três indicadores novos, que respeitam o filtro de período:
+
+| Indicador | Como é calculado |
+|---|---|
+| **Clientes que pagaram** | Clientes distintos com algum recebimento no período (quem pagou 5 parcelas conta 1 vez) |
+| **Custo por cliente** | Despesas do período ÷ clientes que pagaram |
+| **Receita média por cliente** | Receita do escritório ÷ clientes que pagaram |
+
+> **Atenção a uma coisa que você escreveu ao contrário:** você pediu "número
+> de clientes dividido pela despesa total", mas descreveu como "custo de cada
+> lead". Custo por lead é **despesa ÷ clientes**. Implementei assim. Se você
+> quiser mesmo a divisão invertida, me avise que troco.
+
+### 3. Clientes e Processos: filtrar por qualquer campo
+
+Em cima da lista tem um seletor de campo + a caixa de busca:
+
+- **Clientes** — nome, CPF/CNPJ, pagadores, RG, celular, telefone fixo,
+  e-mail, cidade, estado, bairro, endereço, CEP, profissão, estado civil,
+  nome da mãe, nascimento, PIS/PASEP, CTPS, CID, sexo, origem e observações.
+- **Processos** — cliente, nº do processo, parte contrária, tribunal/vara,
+  área, tipo de ação, responsável, grupo de ação, fase judicial, etapa,
+  protocolo, processo originário, pasta, ano, segmento, comarca, vara,
+  resultado, contingenciamento, último andamento, situação e observações.
+
+Deixando em **"Todos os campos"** ele procura em tudo de uma vez. A busca
+ignora acento (procurar "Sao" acha "São").
+
+### 4. Despesas e receitas: recorrência
+
+No **Novo lançamento** tem a opção **"Repetir todo mês"**, onde você informa
+por quantos meses repetir (2 a 120).
+
+Cada mês vira um lançamento próprio — dá para pagar, editar ou apagar um mês
+sem mexer nos outros. E tem o botão **"Apagar série"**, que apaga os meses
+ainda não pagos de uma vez (os já pagos ficam, porque são histórico do caixa).
+
+Se você marcar como "já pago", só o **primeiro** mês nasce pago; os seguintes
+nascem como a pagar — ninguém paga em agosto a conta de dezembro.
+
+### 5. Contas a pagar com data futura e baixa
+
+O lançamento agora tem **Situação**: "Já pago / Já recebido" ou
+"A pagar / A receber".
+
+- Escolhendo "A pagar", você informa a **data de vencimento** e ele aparece na
+  lista sem mexer no saldo da conta.
+- Quando pagar, clique em **"Marcar como pago"**. Abre uma janelinha com a
+  data de hoje já preenchida — **e você pode trocar** se o pagamento aconteceu
+  em outro dia. É essa data que entra no caixa e no saldo.
+
+A lista ganhou os filtros **Todos / Pagos / A pagar**, e dois indicadores
+novos: "A pagar no mês" e "A receber no mês".
+
+### 6. Forma de pagamento
+
+Campo novo no lançamento: Dinheiro, PIX, Cartão de crédito, Cartão de débito,
+Transferência, Boleto e Outro. Em **receita** aparece também **Alvará**
+(alvará não paga despesa, então não aparece em saída).
+
+A forma de pagamento sai na tabela e na exportação.
+
+### 7. Exportação controlada por permissão
+
+Antes qualquer pessoa logada — **inclusive a Consulta Restrita** — baixava a
+base inteira com CPF, endereço e telefone num clique.
+
+Agora exportar é uma permissão como qualquer outra. Vá em **Usuários e Perfis
+de Acesso → aba de permissões**, coluna **"Exportar"**, e ligue/desligue por
+perfil nas linhas Clientes, Processos, Fluxo de caixa e Importação.
+
+Já vem configurado assim (você muda quando quiser):
+
+| Perfil | Pode exportar? |
+|---|---|
+| Administrador Principal | Sim |
+| Sócio Gestor | Sim |
+| Financeiro | Sim |
+| Lançador, Cobrança, Advogado, Consulta | Não |
+
+O Fluxo de Caixa também ganhou um botão **Exportar** (respeitando a mesma
+permissão), que gera a planilha do mês com situação, forma de pagamento,
+vencimento, pagamento e recorrência.
+
+---
+
+## Correção do build
+
+O Lovable estava marcando seus dois últimos envios como **"Build unsuccessful"**.
+A causa era um erro de tipagem em `acordos.tsx` (a chamada de
+`create_agreement_with_schedule` passava campos opcionais como `undefined`, o
+que a configuração estrita do projeto não aceita). Corrigi usando o mesmo
+padrão `dropUndefined` que já existia na tela de Clientes.
+
+Rodei aqui `npx tsc --noEmit` (zero erros) e `npm run build` (concluído com
+sucesso) antes de te mandar.
 
 ---
 
 ## O que continua fora
 
-**Editar um acordo já criado** — só dá para cancelar. Editar mexe no cronograma e nas parcelas já geradas (o que fazer com parcelas já pagas, se o novo valor for menor que o recebido). É decisão de negócio: me diga como o escritório quer que funcione e eu implemento.
+**Editar um acordo já criado** — só dá para cancelar. Editar mexe no
+cronograma e nas parcelas já geradas (o que fazer com parcelas já pagas, se o
+novo valor for menor que o recebido). É decisão de negócio: me diga como o
+escritório quer que funcione e eu implemento.

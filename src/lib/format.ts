@@ -145,3 +145,43 @@ export const TX_TYPE_LABEL: Record<string, string> = {
   entrada_de_terceiros: "Entrada de terceiros",
   repasse_de_terceiros: "Repasse de terceiros",
 };
+
+export const TX_STATUS_LABEL: Record<string, string> = {
+  previsto: "A pagar",
+  pago: "Pago",
+  cancelado: "Cancelado",
+};
+
+/** Formas de pagamento aceitas no lançamento manual do caixa. */
+export const PAYMENT_METHOD_LABEL: Record<string, string> = {
+  dinheiro: "Dinheiro",
+  pix: "PIX",
+  cartao_credito: "Cartão de crédito",
+  cartao_debito: "Cartão de débito",
+  transferencia: "Transferência",
+  boleto: "Boleto",
+  alvara: "Alvará",
+  outro: "Outro",
+};
+
+/** Alvará só existe em entrada — não se paga uma despesa com alvará. */
+export const PAYMENT_METHODS_IN = [
+  "pix",
+  "transferencia",
+  "alvara",
+  "dinheiro",
+  "cartao_credito",
+  "cartao_debito",
+  "boleto",
+  "outro",
+] as const;
+
+export const PAYMENT_METHODS_OUT = [
+  "pix",
+  "transferencia",
+  "dinheiro",
+  "cartao_credito",
+  "cartao_debito",
+  "boleto",
+  "outro",
+] as const;
