@@ -96,6 +96,16 @@ export type AdvFinancialEntry = {
 };
 
 /**
+ * O Advbox numera as categorias para ordenar a lista dele ("6. INDENIZAÇÃO").
+ * Aqui o número não serve para nada e só atrapalha a leitura, então sai.
+ */
+export function cleanCategoryName(raw: string | null): string | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  return s.replace(/^\d+\s*[.)-]\s*/, "").trim() || s;
+}
+
+/**
  * Receita que nasce de processo (alvará, honorários de qualquer tipo,
  * sucumbência) não entra pelo caixa — entra pelos Acordos.
  */
@@ -411,7 +421,7 @@ export function parseAdvboxWorkbook(buffer: ArrayBuffer): AdvboxParse {
         due_date: dueDate,
         competence: text(at(row, "Competencia")) ?? text(at(row, "Competência")),
         paid_on: paidOn,
-        category: text(at(row, "Categoria")),
+        category: cleanCategoryName(text(at(row, "Categoria"))),
         description: text(at(row, "Descrição")),
         amount,
         case_number: text(at(row, "Processo")),

@@ -61,6 +61,53 @@ export type Database = {
           },
         ]
       }
+      backups: {
+        Row: {
+          counts: Json
+          created_at: string
+          created_by: string | null
+          created_by_email: string | null
+          id: string
+          kind: string
+          label: string
+          organization_id: string
+          payload: Json
+          size_bytes: number
+        }
+        Insert: {
+          counts?: Json
+          created_at?: string
+          created_by?: string | null
+          created_by_email?: string | null
+          id?: string
+          kind?: string
+          label: string
+          organization_id: string
+          payload: Json
+          size_bytes?: number
+        }
+        Update: {
+          counts?: Json
+          created_at?: string
+          created_by?: string | null
+          created_by_email?: string | null
+          id?: string
+          kind?: string
+          label?: string
+          organization_id?: string
+          payload?: Json
+          size_bytes?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "backups_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       bank_accounts: {
         Row: {
           account: string | null
@@ -1436,6 +1483,18 @@ export type Database = {
         Args: { _receivable_id: string }
         Returns: undefined
       }
+      create_backup: {
+        Args: { _kind?: string; _label?: string }
+        Returns: string
+      }
+      delete_bank_account: {
+        Args: { _id: string }
+        Returns: undefined
+      }
+      delete_category: {
+        Args: { _id: string }
+        Returns: undefined
+      }
       delete_manual_transaction: {
         Args: { _id: string }
         Returns: undefined
@@ -1443,6 +1502,10 @@ export type Database = {
       delete_recurrence_series: {
         Args: { _group_id: string }
         Returns: number
+      }
+      restore_backup: {
+        Args: { _payload: Json }
+        Returns: Json
       }
       update_manual_transaction: {
         Args: {

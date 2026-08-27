@@ -235,6 +235,16 @@ function Dashboard() {
   const periodExpenses = (periodData?.txs ?? [])
     .filter((t) => t.type === "saida")
     .reduce((s, t) => s + num(t.amount), 0);
+  // Tudo que entrou de fato na conta como dinheiro do escritório: honorários e
+  // sucumbência somados a empréstimos, aportes de sócio e qualquer outra
+  // entrada lançada no caixa. Dinheiro de terceiros continua fora — ele passa
+  // pela conta, mas é da cliente.
+  const periodCashIn = (periodData?.txs ?? [])
+    .filter((t) => t.type === "entrada")
+    .reduce((s, t) => s + num(t.amount), 0);
+  // A diferença entre o que entrou no caixa e o que é honorário/sucumbência:
+  // é o dinheiro que entrou sem vir de processo.
+  const periodNonFeeIn = Math.max(periodCashIn - periodFirmRevenue, 0);
   const periodProfit = periodFirmRevenue - periodExpenses;
   const activeCases = d.activeCasesCount;
   const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
@@ -394,13 +404,24 @@ function Dashboard() {
           {periodLabel(periodType, anchor, custom)}
         </p>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <div className="panel p-4">
             <p className="text-xs text-muted-foreground uppercase">Receita do escritório</p>
             <p className="num mt-1 text-xl font-semibold text-success">
               {periodLoading ? "…" : money(periodFirmRevenue)}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">Honorários + sucumbência</p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Total que entrou no caixa</p>
+            <p className="num mt-1 text-xl font-semibold text-success">
+              {periodLoading ? "…" : money(periodCashIn)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {periodNonFeeIn > 0.01
+                ? `Inclui ${money(periodNonFeeIn)} de empréstimos, aportes e outras entradas`
+                : "Empréstimos e aportes entram aqui"}
+            </p>
           </div>
           <div className="panel p-4">
             <p className="text-xs text-muted-foreground uppercase">Despesas pagas</p>

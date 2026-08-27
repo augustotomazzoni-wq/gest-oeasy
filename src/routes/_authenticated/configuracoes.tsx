@@ -22,6 +22,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { BackupPanel } from "@/components/BackupPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, maskAccount, todayISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
@@ -59,7 +70,13 @@ const EMPTY_BANK = {
 const EMPTY_CAT = { name: "", type: "despesa" };
 
 function ConfiguracoesPage() {
-  const { profile, canWrite } = useAuth();
+  const { profile, canWrite, can, isAdmin } = useAuth();
+  // Excluir apaga de vez; desativar só tira das listas e preserva o histórico.
+  // Por isso excluir é permissão à parte, ligada só para o Administrador.
+  const canDeleteBank = can("contas", "delete");
+  const canDeleteCat = can("categorias", "delete");
+  const [deleteBank, setDeleteBank] = useState<{ id: string; name: string } | null>(null);
+  const [deleteCat, setDeleteCat] = useState<{ id: string; name: string } | null>(null);
   const qc = useQueryClient();
   const [bankOpen, setBankOpen] = useState(false);
   const [catOpen, setCatOpen] = useState(false);
@@ -155,6 +172,34 @@ function ConfiguracoesPage() {
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro", { description: friendlyError(e) }),
+  });
+
+  const removeBank = useMutation({
+    mutationFn: async () => {
+      if (!deleteBank) throw new Error("Conta inválida");
+      const { error } = await supabase.rpc("delete_bank_account", { _id: deleteBank.id });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Conta excluída.");
+      setDeleteBank(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao excluir", { description: friendlyError(e) }),
+  });
+
+  const removeCat = useMutation({
+    mutationFn: async () => {
+      if (!deleteCat) throw new Error("Categoria inválida");
+      const { error } = await supabase.rpc("delete_category", { _id: deleteCat.id });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Categoria excluída.");
+      setDeleteCat(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao excluir", { description: friendlyError(e) }),
   });
 
   const toggleCatActive = useMutation({
@@ -334,6 +379,16 @@ function ConfiguracoesPage() {
                       >
                         {b.active ? "Desativar" : "Reativar"}
                       </Button>
+                      {canDeleteBank && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() => setDeleteBank({ id: b.id, name: b.name })}
+                        >
+                          Excluir
+                        </Button>
+                      )}
                     </td>
                   )}
                 </tr>
@@ -447,6 +502,16 @@ function ConfiguracoesPage() {
                       >
                         {c.active ? "Desativar" : "Reativar"}
                       </Button>
+                      {canDeleteCat && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() => setDeleteCat({ id: c.id, name: c.name })}
+                        >
+                          Excluir
+                        </Button>
+                      )}
                     </td>
                   )}
                 </tr>
@@ -462,6 +527,46 @@ function ConfiguracoesPage() {
           </table>
         </div>
       </div>
+
+      {isAdmin && <BackupPanel />}
+
+      <AlertDialog open={!!deleteBank} onOpenChange={(v) => !v && setDeleteBank(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Excluir a conta {deleteBank?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              A conta some das listas e do sistema. Se ela já tiver qualquer lançamento, a exclusão
+              é recusada — nesse caso use "Desativar", que tira a conta das listas sem mexer no
+              histórico e no saldo do passado.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction disabled={removeBank.isPending} onClick={() => removeBank.mutate()}>
+              {removeBank.isPending ? "Excluindo…" : "Excluir"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!deleteCat} onOpenChange={(v) => !v && setDeleteCat(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Excluir a categoria {deleteCat?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              A categoria some das listas e do sistema. Se ela já estiver em algum lançamento, a
+              exclusão é recusada — nesse caso use "Desativar", que tira a categoria das listas sem
+              alterar os relatórios já fechados.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction disabled={removeCat.isPending} onClick={() => removeCat.mutate()}>
+              {removeCat.isPending ? "Excluindo…" : "Excluir"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
