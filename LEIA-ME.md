@@ -1,92 +1,119 @@
-# Importar receitas e despesas do Advbox
+# Backup, exclusões e receita total no caixa
 
-## Como aplicar
+## Como aplicar — 2 passos
 
-1. No GitHub Desktop: **Fetch origin** → **Pull origin**.
-2. Copie as pastas `src` e `supabase` por cima da pasta clonada.
-3. Commit + push.
+### Passo 1: o banco (faça primeiro)
 
-**O banco já está atualizado** — apliquei a migration direto no Lovable Cloud.
-Ela vai no pacote só para o repositório ficar completo.
+Desta vez **preciso que você cole o SQL** — o editor do Lovable começou a
+embaralhar os comandos quando eu digitava por automação, e não quis arriscar
+deixar meio aplicado.
 
-São só 4 arquivos, e nenhum deles conflita com o que você já subiu.
+Abra **Lovable → More → Cloud → SQL editor** e rode, **nesta ordem**, os dois
+arquivos da pasta `SQL-para-colar`:
+
+1. `1-tabela-de-backups-e-exclusoes.sql`
+2. `2-funcoes-de-backup.sql`
+
+Para cada um: abra o arquivo, Ctrl+A, Ctrl+C, cole no editor, **Run**. Se
+aparecer "Confirm destructive operation", clique em **Run anyway**.
+
+> Dica: se o editor não aceitar o texto colado, clique antes no botão
+> **Clear** — foi o que funcionou aqui.
+
+**Parte disso eu já apliquei**: as permissões de exclusão e a limpeza dos
+nomes de categoria. Os arquivos são seguros de rodar de novo — tudo usa
+`IF NOT EXISTS` / `ON CONFLICT DO NOTHING`.
+
+### Passo 2: o código
+
+**Fetch origin** → **Pull origin**, copie `src` e `supabase` por cima, commit
+e push.
 
 ---
 
-## O que foi feito
+## O que mudou
 
-### A tela de importação agora aceita um terceiro formato
+### 1. Dashboard: total que entrou no caixa
 
-Você joga o arquivo do Advbox na mesma tela **Importar e Exportar** e ele
-reconhece sozinho que é o resumo de receitas e despesas — não precisa escolher
-nada. Os outros dois formatos (Clientes e Processos) continuam funcionando
-igual.
+Card novo ao lado de "Receita do escritório":
 
-### Testado com o seu arquivo real
+- **Receita do escritório** — só honorários + sucumbência (como antes, sem
+  mudança).
+- **Total que entrou no caixa** — tudo que entrou como dinheiro do escritório,
+  incluindo **empréstimos e aportes de sócio**. Embaixo aparece quanto do total
+  veio de fora dos honorários.
 
-`Advbox-2026-08-27_0699822.xlsx`:
+Dinheiro de terceiros continua fora dos dois: passa pela conta, mas é da
+cliente.
 
-| | |
-|---|---|
-| Linhas lidas | 121 |
-| Vão para o Fluxo de Caixa | **94** (2 receitas + 92 despesas) |
-| Ficam de fora (honorários/alvarás) | **27** — R$ 78.423,42 |
-| Categorias distintas | 28 |
-| Linhas sem data de pagamento | 2 → entram como **"a pagar"** |
-| Avisos | nenhum |
+### 2. Categorias sem o número na frente
 
-### Honorários e alvarás não entram pelo caixa
+"6. INDENIZAÇÃO" virou "INDENIZAÇÃO". Vale para as que já estão no banco e
+para as próximas importações.
 
-Como você pediu: toda receita de **honorários** (iniciais, finais,
-sucumbência, consultoria) e de **alvarás** fica de fora da importação. Elas
-nascem do processo e devem entrar pela tela de **Acordos** — viram parcela, e
-quando você registra o recebimento o caixa é alimentado sozinho. Se entrassem
-também por aqui, o mesmo dinheiro seria contado duas vezes.
+**Já apliquei**: das 28 categorias importadas, 26 foram renomeadas. Duas
+ficaram como estavam de propósito:
 
-Na prévia elas aparecem numa lista à parte, esmaecidas, com data, categoria,
-valor e cliente — é a sua lista de trabalho para cadastrar em Acordos.
+- `2. SALÁRIOS` — porque já existe a categoria "Salários"
+- `5. ALUGUEL` — porque já existe a categoria "Aluguel"
 
-Das 29 receitas do arquivo, sobraram 2 para o caixa: **aporte de sócio** e
-**empréstimo** — que realmente não passam por processo.
+Renomear essas duas criaria categorias repetidas. Elas ainda não têm nenhum
+lançamento, então dá para simplesmente **excluir** as duas na tela de
+Configurações (com o botão novo) e reclassificar o que for preciso para as
+originais. Se preferir o contrário — apagar as antigas e ficar com as do
+Advbox — me diga que eu faço.
 
-### Categorias criadas automaticamente
+### 3. Excluir conta bancária e categoria: só o Administrador
 
-As 28 categorias do arquivo que ainda não existem são criadas na hora da
-importação, com o mesmo nome do Advbox (`5. ALUGUEL`, `8. TIKTOK ADS`,
-`2. SALÁRIOS`…), para o histórico continuar batendo com o de lá.
+Botão **Excluir** novo em Configurações, ao lado de Desativar. Aparece só para
+o Administrador Principal — é uma permissão própria na matriz de perfis
+(módulos *Contas bancárias* e *Categorias*, coluna **Excluir**), que você pode
+liberar para outros perfis quando quiser. Os demais continuam só com
+**Desativar**.
 
-Uma observação: seu sistema já tinha 14 categorias com nomes próprios
-("Aluguel", "Salários", "Marketing"). Elas continuam existindo lado a lado com
-as do Advbox. Se preferir unificar, me diga quais juntar que eu faço.
+**Uma trava que coloquei**: se a conta ou a categoria já tiver qualquer
+lançamento, a exclusão é recusada com uma mensagem explicando. Apagar nesse
+caso deixaria lançamentos antigos sem classificação e mudaria relatórios já
+fechados. Nesses casos o certo é desativar. Se você preferir que o
+Administrador possa apagar mesmo assim, me avise que eu solto a trava.
 
-Também criei a trava que impede categoria duplicada — comparando sem acento e
-sem maiúsculas, para "Alugúel" não virar uma segunda "ALUGUEL".
+### 4. Backup completo com histórico de versões
 
-### Reimportar não duplica
+Seção nova no fim de **Configurações**, visível só para o Administrador.
 
-O Advbox não exporta um número de identificação por linha. Então cada linha
-ganha uma impressão digital montada a partir do próprio conteúdo (tipo, datas,
-categoria, descrição, valor e processo). Se você reimportar o mesmo arquivo —
-ou um arquivo maior que repita meses já importados — nada entra em dobro: a
-prévia mostra quantos já existiam e foram ignorados.
+**Gerar backup** — copia clientes, processos, acordos, parcelas, recebimentos,
+repasses, fluxo de caixa, categorias e contas. Você pode dar um nome à versão
+("antes de importar o Advbox"). Cada backup fica guardado no histórico, com
+data, quem gerou, quantos registros e o tamanho.
 
-Os lançamentos importados continuam sendo **lançamentos manuais comuns**: o
-Administrador pode editar e excluir normalmente.
+**Baixar** — salva a versão como arquivo `.json` no seu computador, para
+guardar fora do sistema.
 
-### O que mais a importação preenche
+**Restaurar** — de uma versão do histórico ou de um arquivo que você tenha
+guardado. Três proteções:
 
-- **Conta bancária** — casa pelo nome da planilha ("CONTA PRINCIPAL"); se não
-  existir no sistema, é criada.
-- **Situação** — com data de pagamento vira "pago"; sem data vira "a pagar",
-  aparecendo em "A pagar no período".
-- **Competência** — usa a coluna `Competencia` do Advbox (`04/2026` → abril).
-- **Observações** — guarda o cliente e o número do processo da linha.
+1. Só o Administrador vê e usa.
+2. Antes de restaurar, o sistema grava sozinho uma versão do estado atual no
+   histórico — se restaurar a errada, dá para voltar.
+3. Você precisa escrever **RESTAURAR** à mão para confirmar.
+
+Tudo acontece de uma vez só: ou restaura inteiro, ou não mexe em nada.
+
+**O que o backup NÃO inclui, de propósito:**
+
+- **Usuários e senhas** — pertencem ao serviço de login. Restaurá-los
+  derrubaria o acesso de todo mundo.
+- **Histórico de auditoria** — é o livro de registro do escritório; nunca se
+  sobrescreve.
 
 ---
 
 ## Testado antes de enviar
 
-- Parser rodado contra o seu arquivo real (números da tabela acima)
 - `npx tsc --noEmit` → zero erros
 - `npm run build` → concluído com sucesso
-- Migration aplicada e conferida no banco
+- Permissões e limpeza de categorias já aplicadas e conferidas no banco
+
+Depois de rodar os dois SQL, faça um teste rápido: gere um backup, veja
+aparecer na lista, baixe o arquivo. Aí você já tem uma cópia guardada antes de
+qualquer coisa maior.
