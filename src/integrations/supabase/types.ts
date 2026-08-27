@@ -1483,6 +1483,10 @@ export type Database = {
         Args: { _receivable_id: string }
         Returns: undefined
       }
+      create_transfer_from_receipt: {
+        Args: { _receipt_id: string; _scheduled_for?: string }
+        Returns: string
+      }
       create_backup: {
         Args: { _kind?: string; _label?: string }
         Returns: string

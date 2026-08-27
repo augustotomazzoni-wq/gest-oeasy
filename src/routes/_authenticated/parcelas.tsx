@@ -26,6 +26,7 @@ import {
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, daysBetween } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
+import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/parcelas")({
@@ -78,6 +79,7 @@ type Row = {
 };
 
 type ReceiptRow = {
+  client_amount_received_by_firm: number | null;
   id: string;
   installment_id: string;
   received_on: string;
@@ -145,6 +147,16 @@ function ParcelasPage() {
   const [cancelTarget, setCancelTarget] = useState<Row | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Row | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+  // Repasse oferecido logo após a baixa, e também pelo histórico de recebimentos.
+  const [transferTarget, setTransferTarget] = useState<{
+    receiptId: string;
+    amount: number;
+    cliente: string;
+  } | null>(null);
+  const [transferDate, setTransferDate] = useState(todayISO());
+
+  const clientNameOf = (r: Row | null) =>
+    (r?.client_id && data?.clientMap.get(r.client_id)) || "cliente";
 
   const { data: receipts, isLoading: receiptsLoading } = useQuery({
     queryKey: ["parcela-recebimentos", historyOf?.id],
@@ -153,7 +165,7 @@ function ParcelasPage() {
       const { data, error } = await supabase
         .from("receipts")
         .select(
-          "id, installment_id, received_on, total_amount, fee_amount, success_fee_amount, client_amount, cost_reimbursement, payment_method, reference, reversed_at, reversal_reason",
+          "id, installment_id, received_on, total_amount, fee_amount, success_fee_amount, client_amount, client_amount_received_by_firm, cost_reimbursement, payment_method, reference, reversed_at, reversal_reason",
         )
         .eq("installment_id", historyOf!.id)
         .order("received_on", { ascending: false });
@@ -413,6 +425,7 @@ function ParcelasPage() {
         .select("id")
         .single();
       if (error) throw error;
+      const receiptId = createdReceipt?.id ?? null;
 
       await supabase.from("audit_logs").insert({
         organization_id: profile.organization_id,
@@ -431,13 +444,49 @@ function ParcelasPage() {
           entrada_na_conta_escritorio: amountReceivedInFirmAccount,
         },
       });
+
+      // O que sobra para a cliente decide se vale oferecer o repasse na sequência.
+      return { receiptId, clientReceivedByFirm, clienteNome: clientNameOf(target) };
     },
-    onSuccess: () => {
+    onSuccess: (info) => {
       toast.success("Recebimento registrado.");
       setTarget(null);
       void qc.invalidateQueries();
+      // Dinheiro da cliente que passou pela conta do escritório vira repasse.
+      // Em vez de obrigar a ir até a tela de Repasses e digitar tudo de novo,
+      // o repasse é oferecido aqui, já com o valor certo.
+      if (info?.receiptId && info.clientReceivedByFirm > 0.01) {
+        setTransferTarget({
+          receiptId: info.receiptId,
+          amount: info.clientReceivedByFirm,
+          cliente: info.clienteNome,
+        });
+        setTransferDate(todayISO());
+      }
     },
     onError: (e: Error) => toast.error("Erro ao registrar", { description: friendlyError(e) }),
+  });
+
+  /** Cria o repasse a partir do recebimento, com o valor que já passou pela conta. */
+  const createTransfer = useMutation({
+    mutationFn: async () => {
+      if (!transferTarget) throw new Error("Recebimento inválido");
+      const { error } = await supabase.rpc(
+        "create_transfer_from_receipt",
+        dropUndefined({
+          _receipt_id: transferTarget.receiptId,
+          _scheduled_for: transferDate || undefined,
+        }),
+      );
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Repasse criado em Repasses a Clientes.");
+      setTransferTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) =>
+      toast.error("Erro ao criar repasse", { description: friendlyError(e) }),
   });
 
   return (
@@ -874,6 +923,28 @@ function ParcelasPage() {
                   {money(rc.client_amount)} · Custas {money(rc.cost_reimbursement)}
                 </p>
 
+                {/* Só faz sentido repassar o que passou pela conta do escritório:
+                    o que a cliente recebeu direto do banco nunca entrou aqui. */}
+                {!rc.reversed_at &&
+                  canWrite &&
+                  num(rc.client_amount_received_by_firm) > 0.01 && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="mt-2"
+                      onClick={() => {
+                        setTransferTarget({
+                          receiptId: rc.id,
+                          amount: num(rc.client_amount_received_by_firm),
+                          cliente: clientNameOf(historyOf),
+                        });
+                        setTransferDate(todayISO());
+                      }}
+                    >
+                      Pagar cliente {money(rc.client_amount_received_by_firm)}
+                    </Button>
+                  )}
+
                 {rc.reversed_at ? (
                   <p className="mt-2 text-xs font-medium text-destructive">
                     Estornado em {dateBR(rc.reversed_at)}
@@ -993,6 +1064,44 @@ function ParcelasPage() {
               onClick={() => deleteInstallment.mutate()}
             >
               {deleteInstallment.isPending ? "Apagando…" : "Apagar definitivamente"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Repasse a partir do recebimento: o valor já vem certo, sem redigitar. */}
+      <Dialog open={!!transferTarget} onOpenChange={(v) => !v && setTransferTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pagar cliente</DialogTitle>
+            <DialogDescription>
+              Deste recebimento,{" "}
+              <strong className="num">{money(transferTarget?.amount ?? 0)}</strong> pertencem a{" "}
+              {transferTarget?.cliente} e passaram pela conta do escritório.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="rpdt">Data prevista do repasse</Label>
+              <Input
+                id="rpdt"
+                type="date"
+                value={transferDate}
+                onChange={(e) => setTransferDate(e.target.value)}
+              />
+            </div>
+            <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+              O repasse é criado como <strong>pendente</strong> em Repasses a Clientes, já com o
+              PIX ou a conta da cliente preenchidos. Quando o dinheiro sair de verdade, você dá a
+              baixa por lá — é essa baixa que mexe no caixa.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTransferTarget(null)}>
+              Agora não
+            </Button>
+            <Button onClick={() => createTransfer.mutate()} disabled={createTransfer.isPending}>
+              {createTransfer.isPending ? "Criando…" : "Criar repasse"}
             </Button>
           </DialogFooter>
         </DialogContent>
