@@ -16,8 +16,17 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select,
   SelectContent,
@@ -26,6 +35,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/useAuth";
+import { PeriodFilter } from "@/components/PeriodFilter";
+import {
+  monthLabel,
+  periodLabel,
+  periodRange,
+  startOfPeriodAnchor,
+  type PeriodType,
+} from "@/lib/period";
 import {
   money,
   num,
@@ -40,6 +57,7 @@ import {
 } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { downloadXlsx } from "@/lib/export-xlsx";
+import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/caixa")({
@@ -91,6 +109,9 @@ type TxRow = {
   paid_on: string | null;
   due_date: string | null;
   payment_method: string | null;
+  category_id: string | null;
+  bank_account_id: string | null;
+  notes: string | null;
   recurrence_group_id: string | null;
   recurrence_index: number | null;
   recurrence_total: number | null;
@@ -109,20 +130,32 @@ function CaixaPage() {
   // O Lançador Financeiro também pode registrar entradas e saídas de caixa.
   const canLaunch = canWrite || roles.includes("lancador");
   const canExport = can("caixa", "export");
+  const canEdit = can("caixa", "edit");
+  const canDelete = can("caixa", "delete");
   const qc = useQueryClient();
+
+  const today = todayISO();
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<TxRow | null>(null);
   const [form, setForm] = useState(EMPTY);
-  const [month, setMonth] = useState(() => todayISO().slice(0, 7));
+  const [periodType, setPeriodType] = useState<PeriodType>("mes");
+  const [anchor, setAnchor] = useState(today);
+  const [customStart, setCustomStart] = useState(today.slice(0, 8) + "01");
+  const [customEnd, setCustomEnd] = useState(today);
   const [view, setView] = useState<"todos" | "pago" | "previsto">("todos");
   const [payTarget, setPayTarget] = useState<TxRow | null>(null);
-  const [payDate, setPayDate] = useState(todayISO());
+  const [payDate, setPayDate] = useState(today);
+  const [deleteTarget, setDeleteTarget] = useState<TxRow | null>(null);
+
+  const custom = { start: customStart, end: customEnd };
+  const { start, end } = periodRange(periodType, anchor, custom);
+  // A competência continua sempre à vista, qualquer que seja o recorte
+  // escolhido — é a referência que o escritório usa para fechar o mês.
+  const competencia = monthLabel(startOfPeriodAnchor(periodType, anchor, custom));
 
   const { data, isLoading } = useQuery({
-    queryKey: ["caixa", month],
+    queryKey: ["caixa", start, end],
     queryFn: async () => {
-      const start = `${month}-01`;
-      const [y, m] = month.split("-").map(Number);
-      const end = new Date(Date.UTC(y!, m!, 1)).toISOString().slice(0, 10);
       // Pago entra pela data em que o dinheiro andou; previsto entra pelo
       // vencimento — senão conta a pagar nenhuma apareceria (ela não tem
       // data de pagamento ainda).
@@ -132,14 +165,14 @@ function CaixaPage() {
           .select("*, bank_accounts(name), categories(name)")
           .eq("status", "pago")
           .gte("paid_on", start)
-          .lt("paid_on", end)
+          .lte("paid_on", end)
           .order("paid_on", { ascending: false }),
         supabase
           .from("financial_transactions")
           .select("*, bank_accounts(name), categories(name)")
-          .neq("status", "pago")
+          .eq("status", "previsto")
           .gte("due_date", start)
-          .lt("due_date", end)
+          .lte("due_date", end)
           .order("due_date", { ascending: true }),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
         supabase.from("categories").select("id, name, type").eq("active", true).order("name"),
@@ -166,7 +199,9 @@ function CaixaPage() {
   const rows = useMemo(() => {
     const all = data?.transactions ?? [];
     const filtered =
-      view === "todos" ? all : all.filter((t) => (view === "pago" ? t.status === "pago" : t.status !== "pago"));
+      view === "todos"
+        ? all
+        : all.filter((t) => (view === "pago" ? t.status === "pago" : t.status !== "pago"));
     return [...filtered].sort((a, b) => refDate(b).localeCompare(refDate(a)));
   }, [data, view]);
 
@@ -187,17 +222,23 @@ function CaixaPage() {
     return t;
   }, [data]);
 
+  /** Validação comum a criar e editar. */
+  function validate() {
+    if (!form.description.trim()) throw new Error("Informe a descrição");
+    const amount = num(Number(form.amount));
+    if (amount <= 0) throw new Error("Informe um valor válido");
+    // Conta bancária só é obrigatória no que já foi pago: uma conta agendada
+    // pode nem ter a conta definida ainda.
+    if (form.situacao === "pago" && !form.bank_account_id)
+      throw new Error("Selecione a conta bancária");
+    if (!form.date) throw new Error("Informe a data");
+    return amount;
+  }
+
   const create = useMutation({
     mutationFn: async () => {
       if (!profile) throw new Error("Perfil não carregado");
-      if (!form.description.trim()) throw new Error("Informe a descrição");
-      const amount = num(Number(form.amount));
-      if (amount <= 0) throw new Error("Informe um valor válido");
-      // Conta bancária só é obrigatória no que já foi pago: uma conta agendada
-      // pode nem ter a conta definida ainda.
-      if (form.situacao === "pago" && !form.bank_account_id)
-        throw new Error("Selecione a conta bancária");
-      if (!form.date) throw new Error("Informe a data");
+      const amount = validate();
 
       const months = form.repeat ? Math.trunc(Number(form.repeat_months)) : 1;
       if (form.repeat && (!Number.isFinite(months) || months < 2 || months > 120))
@@ -236,11 +277,53 @@ function CaixaPage() {
     },
     onSuccess: (qtd) => {
       toast.success(qtd > 1 ? `${qtd} lançamentos criados.` : "Lançamento registrado.");
-      setForm(EMPTY);
-      setOpen(false);
+      closeForm();
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
+  });
+
+  const update = useMutation({
+    mutationFn: async () => {
+      if (!editing) throw new Error("Lançamento inválido");
+      const amount = validate();
+      const { error } = await supabase.rpc(
+        "update_manual_transaction",
+        dropUndefined({
+          _id: editing.id,
+          _type: form.type,
+          _description: form.description.trim(),
+          _amount: amount,
+          _status: form.situacao,
+          _date: form.date,
+          _payment_method: form.payment_method || undefined,
+          _bank_account_id: form.bank_account_id || undefined,
+          _category_id: form.category_id || undefined,
+          _notes: form.notes.trim() || undefined,
+        }),
+      );
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Lançamento atualizado.");
+      closeForm();
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
+  });
+
+  const remove = useMutation({
+    mutationFn: async () => {
+      if (!deleteTarget) throw new Error("Lançamento inválido");
+      const { error } = await supabase.rpc("delete_manual_transaction", { _id: deleteTarget.id });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Lançamento excluído.");
+      setDeleteTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao excluir", { description: friendlyError(e) }),
   });
 
   const markPaid = useMutation({
@@ -276,6 +359,37 @@ function CaixaPage() {
     onError: (e: Error) => toast.error("Erro ao apagar", { description: friendlyError(e) }),
   });
 
+  function closeForm() {
+    setOpen(false);
+    setEditing(null);
+    setForm(EMPTY);
+  }
+
+  function openNew() {
+    setEditing(null);
+    setForm(EMPTY);
+    setOpen(true);
+  }
+
+  function openEdit(t: TxRow) {
+    setEditing(t);
+    setForm({
+      type: t.type,
+      description: t.description,
+      amount: String(num(t.amount)),
+      situacao: t.status === "pago" ? "pago" : "previsto",
+      date: refDate(t) || today,
+      payment_method: t.payment_method ?? "",
+      bank_account_id: t.bank_account_id ?? "",
+      category_id: t.category_id ?? "",
+      notes: t.notes ?? "",
+      // Recorrência é decisão de criação: editar um mês não recria a série.
+      repeat: false,
+      repeat_months: "12",
+    });
+    setOpen(true);
+  }
+
   function exportar() {
     const linhas = rows.map((t) => ({
       Data: dateBR(refDate(t)),
@@ -290,11 +404,12 @@ function CaixaPage() {
       Valor: num(t.amount),
       Recorrência: t.recurrence_total ? `${t.recurrence_index}/${t.recurrence_total}` : "",
     }));
-    downloadXlsx(`fluxo_de_caixa_${month}.xlsx`, "Caixa", linhas);
+    downloadXlsx(`fluxo_de_caixa_${start}_a_${end}.xlsx`, "Caixa", linhas);
     toast.success("Planilha gerada.");
   }
 
   const metodos = form.type === "entrada" ? PAYMENT_METHODS_IN : PAYMENT_METHODS_OUT;
+  const saving = create.isPending || update.isPending;
 
   return (
     <>
@@ -308,224 +423,30 @@ function CaixaPage() {
                 Exportar
               </Button>
             )}
-            {canLaunch && (
-              <Dialog
-                open={open}
-                onOpenChange={(v) => {
-                  setOpen(v);
-                  // Limpa ao fechar: sem isto o próximo "Novo lançamento" abre
-                  // com o valor e a descrição do lançamento abandonado.
-                  if (!v) setForm(EMPTY);
-                }}
-              >
-                <DialogTrigger asChild>
-                  <Button>Novo lançamento</Button>
-                </DialogTrigger>
-                <DialogContent className="max-h-[85vh] overflow-y-auto">
-                  <DialogHeader>
-                    <DialogTitle>Novo lançamento manual</DialogTitle>
-                  </DialogHeader>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Tipo</Label>
-                      <Select
-                        value={form.type}
-                        onValueChange={(v) =>
-                          // Trocar de despesa para receita invalida a forma de
-                          // pagamento escolhida (alvará não paga despesa).
-                          setForm({ ...form, type: v, payment_method: "", category_id: "" })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="entrada">Receita (entrada)</SelectItem>
-                          <SelectItem value="saida">Despesa (saída)</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="val">Valor</Label>
-                      <Input
-                        id="val"
-                        type="number"
-                        step="0.01"
-                        value={form.amount}
-                        onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                      />
-                    </div>
-
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="dsc">Descrição</Label>
-                      <Input
-                        id="dsc"
-                        value={form.description}
-                        onChange={(e) => setForm({ ...form, description: e.target.value })}
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Situação</Label>
-                      <Select
-                        value={form.situacao}
-                        onValueChange={(v) => setForm({ ...form, situacao: v })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="pago">
-                            {form.type === "entrada" ? "Já recebido" : "Já pago"}
-                          </SelectItem>
-                          <SelectItem value="previsto">
-                            {form.type === "entrada" ? "A receber" : "A pagar"}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="dt">
-                        {form.situacao === "pago" ? "Data do pagamento" : "Data de vencimento"}
-                      </Label>
-                      <Input
-                        id="dt"
-                        type="date"
-                        value={form.date}
-                        onChange={(e) => setForm({ ...form, date: e.target.value })}
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Forma de pagamento</Label>
-                      <Select
-                        value={form.payment_method}
-                        onValueChange={(v) => setForm({ ...form, payment_method: v })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Selecione" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {metodos.map((m) => (
-                            <SelectItem key={m} value={m}>
-                              {PAYMENT_METHOD_LABEL[m]}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Conta {form.situacao === "pago" ? "*" : ""}</Label>
-                      <Select
-                        value={form.bank_account_id}
-                        onValueChange={(v) => setForm({ ...form, bank_account_id: v })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Selecione a conta" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(data?.banks ?? []).map((b) => (
-                            <SelectItem key={b.id} value={b.id}>
-                              {b.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label>Categoria</Label>
-                      <Select
-                        value={form.category_id}
-                        onValueChange={(v) => setForm({ ...form, category_id: v })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Selecione" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(data?.categories ?? [])
-                            .filter((c) =>
-                              form.type === "entrada" ? c.type === "receita" : c.type === "despesa",
-                            )
-                            .map((c) => (
-                              <SelectItem key={c.id} value={c.id}>
-                                {c.name}
-                              </SelectItem>
-                            ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="space-y-3 rounded-md border border-border p-3 sm:col-span-2">
-                      <div className="flex items-center gap-2">
-                        <Checkbox
-                          id="rep"
-                          checked={form.repeat}
-                          onCheckedChange={(v) => setForm({ ...form, repeat: v === true })}
-                        />
-                        <Label htmlFor="rep" className="cursor-pointer font-normal">
-                          Repetir todo mês (recorrência)
-                        </Label>
-                      </div>
-                      {form.repeat && (
-                        <>
-                          <div className="space-y-2">
-                            <Label htmlFor="repm">Repetir por quantos meses</Label>
-                            <Input
-                              id="repm"
-                              type="number"
-                              min={2}
-                              max={120}
-                              className="w-32"
-                              value={form.repeat_months}
-                              onChange={(e) => setForm({ ...form, repeat_months: e.target.value })}
-                            />
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            Cria um lançamento por mês, sempre no mesmo dia, a partir de{" "}
-                            <strong>{dateBR(form.date)}</strong>. Cada mês pode ser pago, editado ou
-                            apagado sozinho — e a série inteira pode ser apagada de uma vez.
-                          </p>
-                        </>
-                      )}
-                    </div>
-
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="ob">Observações</Label>
-                      <Textarea
-                        id="ob"
-                        value={form.notes}
-                        onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                      />
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button variant="outline" onClick={() => setOpen(false)}>
-                      Cancelar
-                    </Button>
-                    <Button onClick={() => create.mutate()} disabled={create.isPending}>
-                      {create.isPending ? "Salvando…" : "Salvar"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            )}
+            {canLaunch && <Button onClick={openNew}>Novo lançamento</Button>}
           </div>
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <Label htmlFor="mes" className="text-sm">
-          Competência
-        </Label>
-        <Input
-          id="mes"
-          type="month"
-          className="w-44"
-          value={month}
-          onChange={(e) => setMonth(e.target.value)}
-        />
-        <div className="flex flex-wrap gap-2">
+      <div className="panel mb-4 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-semibold">Competência: {competencia}</h2>
+            <p className="text-xs text-muted-foreground">{periodLabel(periodType, anchor, custom)}</p>
+          </div>
+          <PeriodFilter
+            type={periodType}
+            onTypeChange={setPeriodType}
+            anchor={anchor}
+            onAnchorChange={setAnchor}
+            customStart={customStart}
+            customEnd={customEnd}
+            onCustomStartChange={setCustomStart}
+            onCustomEndChange={setCustomEnd}
+          />
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
           {(
             [
               ["todos", "Todos"],
@@ -555,16 +476,16 @@ function CaixaPage() {
           <p className="num mt-1 text-xl font-semibold text-destructive">{money(totals.out)}</p>
         </div>
         <div className="panel p-4">
-          <p className="text-xs text-muted-foreground uppercase">Resultado do mês</p>
+          <p className="text-xs text-muted-foreground uppercase">Resultado do período</p>
           <p className="num mt-1 text-xl font-semibold">{money(totals.in - totals.out)}</p>
         </div>
         <div className="panel p-4">
-          <p className="text-xs text-muted-foreground uppercase">A pagar no mês</p>
+          <p className="text-xs text-muted-foreground uppercase">A pagar</p>
           <p className="num mt-1 text-xl font-semibold text-warning">{money(totals.aPagar)}</p>
           <p className="mt-1 text-xs text-muted-foreground">Ainda não saiu do caixa</p>
         </div>
         <div className="panel p-4">
-          <p className="text-xs text-muted-foreground uppercase">A receber no mês</p>
+          <p className="text-xs text-muted-foreground uppercase">A receber</p>
           <p className="num mt-1 text-xl font-semibold">{money(totals.aReceber)}</p>
         </div>
         <div className="panel p-4">
@@ -657,10 +578,28 @@ function CaixaPage() {
                           variant="ghost"
                           onClick={() => {
                             setPayTarget(t);
-                            setPayDate(todayISO());
+                            setPayDate(today);
                           }}
                         >
                           Marcar como pago
+                        </Button>
+                      )}
+                      {/* Editar e excluir só valem para lançamento manual: o que
+                          veio de um recebimento é espelho da parcela e se
+                          desfaz estornando a origem. */}
+                      {canEdit && !t.source_type && (
+                        <Button size="sm" variant="ghost" onClick={() => openEdit(t)}>
+                          Editar
+                        </Button>
+                      )}
+                      {canDelete && !t.source_type && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() => setDeleteTarget(t)}
+                        >
+                          Excluir
                         </Button>
                       )}
                       {t.recurrence_group_id && t.status !== "pago" && (
@@ -709,6 +648,203 @@ function CaixaPage() {
         </div>
       </div>
 
+      {/* Mesmo formulário serve para criar e para editar. */}
+      <Dialog open={open} onOpenChange={(v) => (v ? setOpen(true) : closeForm())}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{editing ? "Editar lançamento" : "Novo lançamento manual"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Tipo</Label>
+              <Select
+                value={form.type}
+                onValueChange={(v) =>
+                  // Trocar de despesa para receita invalida a forma de
+                  // pagamento escolhida (alvará não paga despesa).
+                  setForm({ ...form, type: v, payment_method: "", category_id: "" })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="entrada">Receita (entrada)</SelectItem>
+                  <SelectItem value="saida">Despesa (saída)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="val">Valor</Label>
+              <Input
+                id="val"
+                type="number"
+                step="0.01"
+                value={form.amount}
+                onChange={(e) => setForm({ ...form, amount: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="dsc">Descrição</Label>
+              <Input
+                id="dsc"
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Situação</Label>
+              <Select
+                value={form.situacao}
+                onValueChange={(v) => setForm({ ...form, situacao: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pago">
+                    {form.type === "entrada" ? "Já recebido" : "Já pago"}
+                  </SelectItem>
+                  <SelectItem value="previsto">
+                    {form.type === "entrada" ? "A receber" : "A pagar"}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="dt">
+                {form.situacao === "pago" ? "Data do pagamento" : "Data de vencimento"}
+              </Label>
+              <Input
+                id="dt"
+                type="date"
+                value={form.date}
+                onChange={(e) => setForm({ ...form, date: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Forma de pagamento</Label>
+              <Select
+                value={form.payment_method}
+                onValueChange={(v) => setForm({ ...form, payment_method: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione" />
+                </SelectTrigger>
+                <SelectContent>
+                  {metodos.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {PAYMENT_METHOD_LABEL[m]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Conta {form.situacao === "pago" ? "*" : ""}</Label>
+              <Select
+                value={form.bank_account_id}
+                onValueChange={(v) => setForm({ ...form, bank_account_id: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione a conta" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(data?.banks ?? []).map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2 sm:col-span-2">
+              <Label>Categoria</Label>
+              <Select
+                value={form.category_id}
+                onValueChange={(v) => setForm({ ...form, category_id: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(data?.categories ?? [])
+                    .filter((c) =>
+                      form.type === "entrada" ? c.type === "receita" : c.type === "despesa",
+                    )
+                    .map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Recorrência é decisão de criação: ao editar, um mês é um mês. */}
+            {!editing && (
+              <div className="space-y-3 rounded-md border border-border p-3 sm:col-span-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="rep"
+                    checked={form.repeat}
+                    onCheckedChange={(v) => setForm({ ...form, repeat: v === true })}
+                  />
+                  <Label htmlFor="rep" className="cursor-pointer font-normal">
+                    Repetir todo mês (recorrência)
+                  </Label>
+                </div>
+                {form.repeat && (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="repm">Repetir por quantos meses</Label>
+                      <Input
+                        id="repm"
+                        type="number"
+                        min={2}
+                        max={120}
+                        className="w-32"
+                        value={form.repeat_months}
+                        onChange={(e) => setForm({ ...form, repeat_months: e.target.value })}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Cria um lançamento por mês, sempre no mesmo dia, a partir de{" "}
+                      <strong>{dateBR(form.date)}</strong>. Cada mês pode ser pago, editado ou
+                      apagado sozinho — e a série inteira pode ser apagada de uma vez.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="ob">Observações</Label>
+              <Textarea
+                id="ob"
+                value={form.notes}
+                onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeForm}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => (editing ? update.mutate() : create.mutate())}
+              disabled={saving}
+            >
+              {saving ? "Salvando…" : "Salvar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Baixa de conta agendada: a data vem preenchida com hoje, mas pode ser
           trocada quando o pagamento aconteceu em outro dia. */}
       <Dialog open={!!payTarget} onOpenChange={(v) => !v && setPayTarget(null)}>
@@ -742,6 +878,26 @@ function CaixaPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Excluir este lançamento?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget?.description} — {money(deleteTarget?.amount ?? 0)} em{" "}
+              {dateBR(refDate(deleteTarget ?? { status: "", paid_on: null, due_date: null }))}. O
+              lançamento sai do caixa e do saldo da conta. Fica registrado quem apagou, quando e
+              com quais valores, no histórico de auditoria.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction disabled={remove.isPending} onClick={() => remove.mutate()}>
+              {remove.isPending ? "Excluindo…" : "Excluir"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

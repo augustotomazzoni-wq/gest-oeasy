@@ -75,6 +75,7 @@ const ACTIONS: { key: string; label: string }[] = [
   { key: "view", label: "Ver" },
   { key: "create", label: "Incluir" },
   { key: "edit", label: "Editar" },
+  { key: "delete", label: "Excluir" },
   { key: "cancel_or_reverse", label: "Cancelar/estornar" },
   { key: "approve", label: "Aprovar" },
   { key: "export", label: "Exportar" },

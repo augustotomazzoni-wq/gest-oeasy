@@ -35,72 +35,8 @@ import {
   endOfYearISO,
 } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
-
-const MONTH_NAMES = [
-  "Janeiro",
-  "Fevereiro",
-  "Março",
-  "Abril",
-  "Maio",
-  "Junho",
-  "Julho",
-  "Agosto",
-  "Setembro",
-  "Outubro",
-  "Novembro",
-  "Dezembro",
-];
-
-type PeriodType = "dia" | "semana" | "mes" | "ano" | "personalizado";
-
-function periodRange(
-  type: PeriodType,
-  anchor: string,
-  custom?: { start: string; end: string },
-): { start: string; end: string } {
-  switch (type) {
-    case "dia":
-      return { start: anchor, end: anchor };
-    case "semana":
-      return { start: startOfWeekISO(anchor), end: endOfWeekISO(anchor) };
-    case "ano":
-      return { start: startOfYearISO(anchor), end: endOfYearISO(anchor) };
-    case "personalizado": {
-      // Datas invertidas são um erro de digitação comum — troca em vez de
-      // devolver um intervalo vazio e um dashboard todo zerado.
-      const s = custom?.start || anchor;
-      const e = custom?.end || anchor;
-      return s <= e ? { start: s, end: e } : { start: e, end: s };
-    }
-    case "mes":
-    default:
-      return { start: startOfMonthISO(anchor), end: endOfMonthISO(anchor) };
-  }
-}
-
-function periodLabel(
-  type: PeriodType,
-  anchor: string,
-  custom?: { start: string; end: string },
-): string {
-  const { start, end } = periodRange(type, anchor, custom);
-  if (type === "dia") return dateBR(anchor);
-  if (type === "semana") return `${dateBR(start)} – ${dateBR(end)}`;
-  if (type === "ano") return anchor.slice(0, 4);
-  if (type === "personalizado") return `${dateBR(start)} – ${dateBR(end)}`;
-  const [y, m] = anchor.split("-").map(Number);
-  return `${MONTH_NAMES[(m ?? 1) - 1]} de ${y}`;
-}
-
-function shiftAnchor(type: PeriodType, anchor: string, direction: 1 | -1): string {
-  if (type === "dia") return addDaysISO(anchor, direction);
-  if (type === "semana") return addDaysISO(anchor, direction * 7);
-  if (type === "ano") {
-    const [y, m, d] = anchor.split("-");
-    return `${Number(y) + direction}-${m}-${d}`;
-  }
-  return addMonthsISO(anchor, direction);
-}
+import { PeriodFilter } from "@/components/PeriodFilter";
+import { periodLabel, periodRange, type PeriodType } from "@/lib/period";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -316,6 +252,8 @@ function Dashboard() {
   const costPerClient = payingCount > 0 ? periodExpenses / payingCount : 0;
   // Ticket médio: quanto o escritório faturou, em média, por cliente pagante.
   const revenuePerClient = payingCount > 0 ? periodFirmRevenue / payingCount : 0;
+  // O que sobra por cliente: receita menos despesa, rateada pelos pagantes.
+  const profitPerClient = revenuePerClient - costPerClient;
 
   const totalBank = d.banks.reduce((s, b) => s + num(b.balance as number), 0);
   const firmRevenue = d.installments.reduce(
@@ -440,71 +378,16 @@ function Dashboard() {
               Só a parte do escritório — o valor que pertence à cliente fica de fora.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {(
-              [
-                ["dia", "Dia"],
-                ["semana", "Semana"],
-                ["mes", "Mês"],
-                ["ano", "Ano"],
-                ["personalizado", "Personalizado"],
-              ] as const
-            ).map(([key, label]) => (
-              <Button
-                key={key}
-                size="sm"
-                variant={periodType === key ? "default" : "outline"}
-                onClick={() => setPeriodType(key)}
-              >
-                {label}
-              </Button>
-            ))}
-            {periodType === "personalizado" ? (
-              <div className="flex flex-wrap items-center gap-1">
-                <Input
-                  type="date"
-                  className="w-40"
-                  aria-label="Data inicial"
-                  value={customStart}
-                  onChange={(e) => setCustomStart(e.target.value)}
-                />
-                <span className="text-sm text-muted-foreground">até</span>
-                <Input
-                  type="date"
-                  className="w-40"
-                  aria-label="Data final"
-                  value={customEnd}
-                  onChange={(e) => setCustomEnd(e.target.value)}
-                />
-              </div>
-            ) : (
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  aria-label="Período anterior"
-                  onClick={() => setAnchor((a) => shiftAnchor(periodType, a, -1))}
-                >
-                  ‹
-                </Button>
-                <Input
-                  type="date"
-                  className="w-40"
-                  aria-label="Data de referência do período"
-                  value={anchor}
-                  onChange={(e) => setAnchor(e.target.value || today)}
-                />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  aria-label="Próximo período"
-                  onClick={() => setAnchor((a) => shiftAnchor(periodType, a, 1))}
-                >
-                  ›
-                </Button>
-              </div>
-            )}
-          </div>
+          <PeriodFilter
+            type={periodType}
+            onTypeChange={setPeriodType}
+            anchor={anchor}
+            onAnchorChange={setAnchor}
+            customStart={customStart}
+            customEnd={customEnd}
+            onCustomStartChange={setCustomStart}
+            onCustomEndChange={setCustomEnd}
+          />
         </div>
 
         <p className="num mt-3 text-sm text-muted-foreground">
@@ -546,7 +429,7 @@ function Dashboard() {
 
         {/* Indicadores por cliente pagante: a base dos dois é a mesma — quantos
             clientes distintos colocaram dinheiro no escritório no período. */}
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="panel p-4">
             <p className="text-xs text-muted-foreground uppercase">Clientes que pagaram</p>
             <p className="num mt-1 text-xl font-semibold">{periodLoading ? "…" : payingCount}</p>
@@ -570,6 +453,19 @@ function Dashboard() {
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               Receita do escritório ÷ clientes que pagaram
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Lucro por cliente</p>
+            <p
+              className={`num mt-1 text-xl font-semibold ${
+                profitPerClient >= 0 ? "text-success" : "text-destructive"
+              }`}
+            >
+              {periodLoading ? "…" : payingCount > 0 ? money(profitPerClient) : "—"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Receita por cliente − custo por cliente
             </p>
           </div>
         </div>

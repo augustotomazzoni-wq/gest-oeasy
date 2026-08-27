@@ -25,6 +25,7 @@ export type PermAction =
   | "view"
   | "create"
   | "edit"
+  | "delete"
   | "cancel_or_reverse"
   | "approve"
   | "export";

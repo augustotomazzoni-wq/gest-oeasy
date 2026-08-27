@@ -1433,9 +1433,28 @@ export type Database = {
         Args: { _receivable_id: string }
         Returns: undefined
       }
+      delete_manual_transaction: {
+        Args: { _id: string }
+        Returns: undefined
+      }
       delete_recurrence_series: {
         Args: { _group_id: string }
         Returns: number
+      }
+      update_manual_transaction: {
+        Args: {
+          _amount: number
+          _bank_account_id?: string
+          _category_id?: string
+          _date: string
+          _description: string
+          _id: string
+          _notes?: string
+          _payment_method?: string
+          _status: string
+          _type: string
+        }
+        Returns: undefined
       }
       has_permission: {
         Args: { _action: string; _module: string; _user_id: string }
