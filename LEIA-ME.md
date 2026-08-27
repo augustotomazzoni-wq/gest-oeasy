@@ -1,88 +1,92 @@
-# Atualização 2 de 27/08/2026
+# Importar receitas e despesas do Advbox
 
-## Antes de copiar: dê Pull primeiro
+## Como aplicar
 
-No GitHub Desktop, clique em **Fetch origin** e depois **Pull origin**. Foi a
-falta disso que gerou o conflito da vez passada.
+1. No GitHub Desktop: **Fetch origin** → **Pull origin**.
+2. Copie as pastas `src` e `supabase` por cima da pasta clonada.
+3. Commit + push.
 
-Depois copie as pastas `src` e `supabase` por cima da pasta clonada e faça
-commit + push.
+**O banco já está atualizado** — apliquei a migration direto no Lovable Cloud.
+Ela vai no pacote só para o repositório ficar completo.
 
-**O banco já está atualizado** — apliquei a migration
-`20260827230000_editar_excluir_lancamentos.sql` direto no Lovable Cloud. Ela vai
-junto no pacote só para o repositório ficar completo; você não precisa rodar
-nada.
+São só 4 arquivos, e nenhum deles conflita com o que você já subiu.
 
 ---
 
-## O que mudou
+## O que foi feito
 
-### 1. Editar e excluir receitas e despesas
+### A tela de importação agora aceita um terceiro formato
 
-Na tela **Fluxo de Caixa**, cada lançamento ganhou os botões **Editar** e
-**Excluir**.
+Você joga o arquivo do Advbox na mesma tela **Importar e Exportar** e ele
+reconhece sozinho que é o resumo de receitas e despesas — não precisa escolher
+nada. Os outros dois formatos (Clientes e Processos) continuam funcionando
+igual.
 
-- **Editar** abre o mesmo formulário do lançamento, já preenchido. Dá para
-  mudar tipo, valor, descrição, situação, data, forma de pagamento, conta,
-  categoria e observações.
-- **Excluir** pede confirmação e registra no histórico de auditoria quem
-  apagou, quando e com quais valores — nada some sem rastro.
+### Testado com o seu arquivo real
 
-**Só aparece para o Administrador Principal.** Criei duas permissões novas na
-matriz (**Usuários e Perfis de Acesso**, módulo *Fluxo de caixa*): a coluna
-**Editar** e a coluna nova **Excluir**. Todos os outros perfis nascem
-desmarcados; você libera quem quiser, quando quiser.
+`Advbox-2026-08-27_0699822.xlsx`:
 
-**Uma trava importante:** lançamento que nasceu de um recebimento ou de um
-repasse **não** pode ser editado nem excluído por aqui — ele é espelho da
-parcela, e mexer nele por fora deixaria o caixa divergente. Para desfazer esses,
-o caminho continua sendo **estornar o recebimento**, que já apaga o lançamento
-sozinho. Nesses casos os botões simplesmente não aparecem.
+| | |
+|---|---|
+| Linhas lidas | 121 |
+| Vão para o Fluxo de Caixa | **94** (2 receitas + 92 despesas) |
+| Ficam de fora (honorários/alvarás) | **27** — R$ 78.423,42 |
+| Categorias distintas | 28 |
+| Linhas sem data de pagamento | 2 → entram como **"a pagar"** |
+| Avisos | nenhum |
 
-### 2. Dashboard: lucro por cliente
+### Honorários e alvarás não entram pelo caixa
 
-Card novo ao lado dos outros dois:
+Como você pediu: toda receita de **honorários** (iniciais, finais,
+sucumbência, consultoria) e de **alvarás** fica de fora da importação. Elas
+nascem do processo e devem entrar pela tela de **Acordos** — viram parcela, e
+quando você registra o recebimento o caixa é alimentado sozinho. Se entrassem
+também por aqui, o mesmo dinheiro seria contado duas vezes.
 
-**Lucro por cliente = Receita por cliente − Custo por cliente**
+Na prévia elas aparecem numa lista à parte, esmaecidas, com data, categoria,
+valor e cliente — é a sua lista de trabalho para cadastrar em Acordos.
 
-Ou seja, o que sobra em média de cada cliente que pagou no período. Fica verde
-quando positivo e vermelho quando negativo. Respeita todos os filtros de
-período, inclusive o personalizado.
+Das 29 receitas do arquivo, sobraram 2 para o caixa: **aporte de sócio** e
+**empréstimo** — que realmente não passam por processo.
 
-Os quatro indicadores por cliente agora ficam juntos: Clientes que pagaram,
-Custo por cliente, Receita média por cliente e Lucro por cliente.
+### Categorias criadas automaticamente
 
-### 3. Fluxo de Caixa com o mesmo filtro do Dashboard
+As 28 categorias do arquivo que ainda não existem são criadas na hora da
+importação, com o mesmo nome do Advbox (`5. ALUGUEL`, `8. TIKTOK ADS`,
+`2. SALÁRIOS`…), para o histórico continuar batendo com o de lá.
 
-O seletor de mês virou o mesmo controle do Dashboard: **Dia / Semana / Mês /
-Ano / Personalizado**, com as setas ‹ › para andar no tempo e o intervalo livre
-com data de início e fim.
+Uma observação: seu sistema já tinha 14 categorias com nomes próprios
+("Aluguel", "Salários", "Marketing"). Elas continuam existindo lado a lado com
+as do Advbox. Se preferir unificar, me diga quais juntar que eu faço.
 
-**A competência continua sempre à vista.** No alto do painel aparece fixo
-"**Competência: Agosto de 2026**", com o intervalo exato logo abaixo — mesmo
-quando você escolhe um dia, uma semana ou um período livre. O padrão ao abrir a
-tela continua sendo o mês atual, como antes.
+Também criei a trava que impede categoria duplicada — comparando sem acento e
+sem maiúsculas, para "Alugúel" não virar uma segunda "ALUGUEL".
 
-Os totais passaram a acompanhar o período escolhido ("Resultado do período",
-"A pagar", "A receber") e a exportação sai com o intervalo no nome do arquivo.
+### Reimportar não duplica
 
-Por baixo, Dashboard e Fluxo de Caixa passaram a usar **o mesmo código de
-filtro** (`src/lib/period.ts` + `src/components/PeriodFilter.tsx`) — assim os
-dois nunca mais mostram recortes de tempo diferentes.
+O Advbox não exporta um número de identificação por linha. Então cada linha
+ganha uma impressão digital montada a partir do próprio conteúdo (tipo, datas,
+categoria, descrição, valor e processo). Se você reimportar o mesmo arquivo —
+ou um arquivo maior que repita meses já importados — nada entra em dobro: a
+prévia mostra quantos já existiam e foram ignorados.
+
+Os lançamentos importados continuam sendo **lançamentos manuais comuns**: o
+Administrador pode editar e excluir normalmente.
+
+### O que mais a importação preenche
+
+- **Conta bancária** — casa pelo nome da planilha ("CONTA PRINCIPAL"); se não
+  existir no sistema, é criada.
+- **Situação** — com data de pagamento vira "pago"; sem data vira "a pagar",
+  aparecendo em "A pagar no período".
+- **Competência** — usa a coluna `Competencia` do Advbox (`04/2026` → abril).
+- **Observações** — guarda o cliente e o número do processo da linha.
 
 ---
 
 ## Testado antes de enviar
 
+- Parser rodado contra o seu arquivo real (números da tabela acima)
 - `npx tsc --noEmit` → zero erros
 - `npm run build` → concluído com sucesso
 - Migration aplicada e conferida no banco
-
----
-
-## O que continua fora
-
-**Editar um acordo já criado** — só dá para cancelar. Editar mexe no cronograma
-e nas parcelas já geradas (o que fazer com parcelas já pagas, se o novo valor
-for menor que o recebido). É decisão de negócio: me diga como o escritório quer
-que funcione e eu implemento.

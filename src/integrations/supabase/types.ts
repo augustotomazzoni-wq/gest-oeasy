@@ -612,6 +612,7 @@ export type Database = {
       }
       financial_transactions: {
         Row: {
+          import_hash: string | null
           payment_method: string | null
           recurrence_group_id: string | null
           recurrence_index: number | null
@@ -638,6 +639,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          import_hash?: string | null
           payment_method?: string | null
           recurrence_group_id?: string | null
           recurrence_index?: number | null
@@ -664,6 +666,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          import_hash?: string | null
           payment_method?: string | null
           recurrence_group_id?: string | null
           recurrence_index?: number | null

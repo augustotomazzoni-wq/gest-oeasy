@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag } from "@/components/StatusBadge";
@@ -19,6 +19,9 @@ import {
 } from "@/lib/advbox-format";
 import { downloadXlsx } from "@/lib/export-xlsx";
 import { toast } from "sonner";
+
+/** dateBR aceitando nulo, para as prévias. */
+const dateBRShort = (v: string | null | undefined) => (v ? dateBR(v) : "—");
 
 export const Route = createFileRoute("/_authenticated/importar")({
   head: () => ({
@@ -49,6 +52,42 @@ function ImportarPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [parsed, setParsed] = useState<ParsedWorkbook | null>(null);
   const [advbox, setAdvbox] = useState<AdvboxParse | null>(null);
+  // "04/2026" → "2026-04-01". A competência do Advbox vem só com mês e ano.
+  const competenciaISO = (v: string | null) => {
+    const m = String(v ?? "").match(/^(\d{2})\/(\d{4})$/);
+    return m ? `${m[2]}-${m[1]}-01` : null;
+  };
+
+  /** Números da prévia do resumo financeiro. */
+  const finResumo = useMemo(() => {
+    const vazio = {
+      paraCaixa: 0,
+      paraAcordos: 0,
+      receitas: 0,
+      despesas: 0,
+      totalDespesas: 0,
+      totalAcordos: 0,
+      categorias: [] as string[],
+    };
+    if (advbox?.kind !== "financeiro") return vazio;
+    const cats = new Set<string>();
+    let r = vazio;
+    for (const e of advbox.entries) {
+      if (e.category) cats.add(`${e.type === "entrada" ? "receita" : "despesa"}|${e.category}`);
+      if (e.route === "acordos") {
+        r = { ...r, paraAcordos: r.paraAcordos + 1, totalAcordos: r.totalAcordos + e.amount };
+        continue;
+      }
+      r = {
+        ...r,
+        paraCaixa: r.paraCaixa + 1,
+        receitas: r.receitas + (e.type === "entrada" ? 1 : 0),
+        despesas: r.despesas + (e.type === "saida" ? 1 : 0),
+        totalDespesas: r.totalDespesas + (e.type === "saida" ? e.amount : 0),
+      };
+    }
+    return { ...r, categorias: [...cats] };
+  }, [advbox]);
   const [fileName, setFileName] = useState("");
   const [log, setLog] = useState<string[]>([]);
 
@@ -115,7 +154,9 @@ function ImportarPage() {
       toast.success(
         result.kind === "clientes"
           ? `Planilha de clientes lida: ${result.clients.length} registro(s).`
-          : `Planilha de processos lida: ${result.cases.length} registro(s).`,
+          : result.kind === "processos"
+            ? `Planilha de processos lida: ${result.cases.length} registro(s).`
+            : `Resumo financeiro lido: ${result.entries.length} lançamento(s).`,
       );
       return;
     } catch {
@@ -145,6 +186,124 @@ function ImportarPage() {
       if (!advbox || !profile) throw new Error("Nenhuma planilha carregada");
       const org = profile.organization_id;
       const messages: string[] = [];
+
+      // ---------- Resumo de receitas e despesas ----------
+      if (advbox.kind === "financeiro") {
+        const paraCaixa = advbox.entries.filter((e) => e.route === "caixa");
+        const paraAcordos = advbox.entries.filter((e) => e.route === "acordos");
+
+        // 1) Conta bancária: casa pelo nome que veio na planilha; se não
+        //    existir, cria — senão o lançamento ficaria sem conta e não
+        //    entraria no saldo.
+        const { data: contas, error: contaErr } = await supabase
+          .from("bank_accounts")
+          .select("id, name");
+        if (contaErr) throw contaErr;
+        const contaPorNome = new Map<string, string>(
+          (contas ?? []).map((b) => [matchKey(b.name), b.id] as [string, string]),
+        );
+        let contasCriadas = 0;
+        const nomesDeConta = new Set(
+          paraCaixa.map((e) => e.account ?? "Conta principal").map((n) => n.trim()),
+        );
+        for (const nome of nomesDeConta) {
+          if (contaPorNome.has(matchKey(nome))) continue;
+          const { data, error } = await supabase
+            .from("bank_accounts")
+            .insert({ organization_id: org, name: nome, created_by: profile.id })
+            .select("id")
+            .single();
+          if (error) throw new Error(`Conta ${nome}: ${friendlyError(error)}`);
+          contaPorNome.set(matchKey(nome), data.id);
+          contasCriadas += 1;
+        }
+
+        // 2) Categorias: cria as que ainda não existem, com o mesmo nome do
+        //    Advbox, para o histórico continuar batendo com o de lá.
+        const { data: cats, error: catErr } = await supabase
+          .from("categories")
+          .select("id, name, type");
+        if (catErr) throw catErr;
+        const catPorChave = new Map<string, string>(
+          (cats ?? []).map((c) => [`${c.type}|${matchKey(c.name)}`, c.id] as [string, string]),
+        );
+        const faltando = new Map<string, { name: string; type: "receita" | "despesa" }>();
+        for (const e of advbox.entries) {
+          if (!e.category) continue;
+          const tipo = e.type === "entrada" ? "receita" : "despesa";
+          const chave = `${tipo}|${matchKey(e.category)}`;
+          if (catPorChave.has(chave) || faltando.has(chave)) continue;
+          faltando.set(chave, { name: e.category, type: tipo });
+        }
+        for (const [chave, nova] of faltando) {
+          const { data, error } = await supabase
+            .from("categories")
+            .insert({ organization_id: org, name: nova.name, type: nova.type as never })
+            .select("id")
+            .single();
+          if (error) throw new Error(`Categoria ${nova.name}: ${friendlyError(error)}`);
+          catPorChave.set(chave, data.id);
+        }
+
+        // 3) Lançamentos. O import_hash impede a mesma linha de entrar duas
+        //    vezes se você reimportar o arquivo depois.
+        let gravados = 0;
+        let jaExistiam = 0;
+        for (const e of paraCaixa) {
+          const tipo = e.type === "entrada" ? "receita" : "despesa";
+          const catId = e.category
+            ? (catPorChave.get(`${tipo}|${matchKey(e.category)}`) ?? null)
+            : null;
+          const contaId =
+            contaPorNome.get(matchKey(e.account ?? "Conta principal")) ?? null;
+          const pago = !!e.paid_on;
+          const { error } = await supabase.from("financial_transactions").insert({
+            organization_id: org,
+            created_by: profile.id,
+            type: e.type as never,
+            status: (pago ? "pago" : "previsto") as never,
+            description: e.description ?? e.category ?? "Lançamento importado do Advbox",
+            amount: e.amount,
+            paid_on: e.paid_on,
+            due_date: e.due_date ?? e.paid_on,
+            competence_date: competenciaISO(e.competence) ?? e.due_date ?? e.paid_on,
+            category_id: catId,
+            bank_account_id: contaId,
+            notes: [e.parties, e.case_number].filter(Boolean).join(" — ") || null,
+            import_hash: e.fingerprint,
+          });
+          if (error) {
+            // 23505 = já importado antes. Não é erro: é a trava funcionando.
+            if ((error as { code?: string }).code === "23505") {
+              jaExistiam += 1;
+              continue;
+            }
+            throw new Error(`${e.description ?? e.category}: ${friendlyError(error)}`);
+          }
+          gravados += 1;
+        }
+
+        messages.push(`${gravados} lançamento(s) importado(s) para o Fluxo de Caixa.`);
+        if (jaExistiam) messages.push(`${jaExistiam} já existiam e foram ignorados.`);
+        if (faltando.size) messages.push(`${faltando.size} categoria(s) criada(s).`);
+        if (contasCriadas) messages.push(`${contasCriadas} conta(s) bancária(s) criada(s).`);
+        if (paraAcordos.length) {
+          messages.push(
+            `${paraAcordos.length} receita(s) de honorários/alvará NÃO foram importadas — cadastre pela tela de Acordos para não contar o dinheiro duas vezes.`,
+          );
+        }
+
+        await supabase.from("audit_logs").insert({
+          organization_id: org,
+          user_id: profile.id,
+          user_email: profile.email,
+          action: "importar_financeiro",
+          table_name: "financial_transactions",
+          new_values: { arquivo: fileName, resultado: messages.join(" ") },
+        });
+
+        return messages;
+      }
 
       // Base atual para casar por CPF/CNPJ (ou pelo nome, quando não há CPF).
       const { data: existing, error: exErr } = await supabase
@@ -609,13 +768,21 @@ function ImportarPage() {
             <div className="panel p-4">
               <p className="text-xs text-muted-foreground uppercase">Tipo de planilha</p>
               <p className="mt-1 text-lg font-semibold">
-                {advbox.kind === "clientes" ? "Clientes" : "Processos"}
+                {advbox.kind === "clientes"
+                  ? "Clientes"
+                  : advbox.kind === "processos"
+                    ? "Processos"
+                    : "Receitas e despesas"}
               </p>
             </div>
             <div className="panel p-4">
               <p className="text-xs text-muted-foreground uppercase">Registros lidos</p>
               <p className="num mt-1 text-2xl font-semibold">
-                {advbox.kind === "clientes" ? advbox.clients.length : advbox.cases.length}
+                {advbox.kind === "clientes"
+                  ? advbox.clients.length
+                  : advbox.kind === "processos"
+                    ? advbox.cases.length
+                    : advbox.entries.length}
               </p>
             </div>
             <div className="panel p-4">
@@ -623,6 +790,64 @@ function ImportarPage() {
               <p className="mt-1 truncate text-sm">{fileName}</p>
             </div>
           </div>
+
+          {advbox.kind === "financeiro" && (
+            <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="panel p-4">
+                <p className="text-xs text-muted-foreground uppercase">Vão para o caixa</p>
+                <p className="num mt-1 text-2xl font-semibold">{finResumo.paraCaixa}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {finResumo.receitas} receita(s) e {finResumo.despesas} despesa(s)
+                </p>
+              </div>
+              <div className="panel p-4">
+                <p className="text-xs text-muted-foreground uppercase">Total de despesas</p>
+                <p className="num mt-1 text-xl font-semibold text-destructive">
+                  {money(finResumo.totalDespesas)}
+                </p>
+              </div>
+              <div className="panel p-4">
+                <p className="text-xs text-muted-foreground uppercase">Categorias novas</p>
+                <p className="num mt-1 text-2xl font-semibold">{finResumo.categorias.length}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Criadas automaticamente ao confirmar
+                </p>
+              </div>
+              <div className="panel border-warning/40 p-4">
+                <p className="text-xs text-muted-foreground uppercase">Ficam de fora</p>
+                <p className="num mt-1 text-2xl font-semibold text-warning">
+                  {finResumo.paraAcordos}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Honorários e alvarás — {money(finResumo.totalAcordos)}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {advbox.kind === "financeiro" && finResumo.paraAcordos > 0 && (
+            <div className="panel mb-4 border-warning/40 p-4">
+              <h2 className="font-display text-sm font-semibold">
+                Estas receitas você cadastra pela tela de Acordos
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Honorários, sucumbência e alvarás nascem do processo: entram como acordo, viram
+                parcela, e o recebimento aparece no caixa sozinho. Se entrassem também por aqui, o
+                mesmo dinheiro seria contado duas vezes.
+              </p>
+              <ul className="mt-2 max-h-40 space-y-1 overflow-auto text-sm text-muted-foreground">
+                {advbox.entries
+                  .filter((e) => e.route === "acordos")
+                  .map((e, i) => (
+                    <li key={`${e.fingerprint}-${i}`}>
+                      {dateBRShort(e.paid_on ?? e.due_date)} — {e.category} —{" "}
+                      <strong className="num text-foreground">{money(e.amount)}</strong>
+                      {e.parties ? ` — ${e.parties}` : ""}
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
 
           {advbox.warnings.length > 0 && (
             <div className="panel mb-4 border-warning/40 p-4">
@@ -649,6 +874,14 @@ function ImportarPage() {
                       <th>Celular</th>
                       <th className="p-3">Cidade/UF</th>
                     </>
+                  ) : advbox.kind === "financeiro" ? (
+                    <>
+                      <th className="p-3">Data</th>
+                      <th>Tipo</th>
+                      <th>Categoria</th>
+                      <th>Descrição</th>
+                      <th className="p-3 text-right">Valor</th>
+                    </>
                   ) : (
                     <>
                       <th className="p-3">Cliente</th>
@@ -671,17 +904,43 @@ function ImportarPage() {
                         </td>
                       </tr>
                     ))
-                  : advbox.cases.map((k, i) => (
-                      <tr
-                        key={`${k.case_number ?? k.client_name}-${i}`}
-                        className="border-b border-border/60"
-                      >
-                        <td className="p-3 font-medium">{k.client_name}</td>
-                        <td className="num">{k.case_number ?? "—"}</td>
-                        <td>{k.opposing_party ?? "—"}</td>
-                        <td className="p-3">{k.responsible_lawyer ?? "—"}</td>
-                      </tr>
-                    ))}
+                  : advbox.kind === "financeiro"
+                    ? advbox.entries.map((e, i) => (
+                        <tr
+                          key={`${e.fingerprint}-${i}`}
+                          className={`border-b border-border/60 ${
+                            e.route === "acordos" ? "opacity-50" : ""
+                          }`}
+                        >
+                          <td className="p-3 whitespace-nowrap">
+                            {dateBRShort(e.paid_on ?? e.due_date)}
+                          </td>
+                          <td>
+                            <Tag tone={e.type === "entrada" ? "success" : "danger"}>
+                              {e.type === "entrada" ? "Receita" : "Despesa"}
+                            </Tag>
+                          </td>
+                          <td className="text-xs">{e.category ?? "—"}</td>
+                          <td className="text-xs">
+                            {e.description ?? e.parties ?? "—"}
+                            {e.route === "acordos" && (
+                              <span className="block text-warning">vai pela tela de Acordos</span>
+                            )}
+                          </td>
+                          <td className="num p-3 text-right">{money(e.amount)}</td>
+                        </tr>
+                      ))
+                    : advbox.cases.map((k, i) => (
+                        <tr
+                          key={`${k.case_number ?? k.client_name}-${i}`}
+                          className="border-b border-border/60"
+                        >
+                          <td className="p-3 font-medium">{k.client_name}</td>
+                          <td className="num">{k.case_number ?? "—"}</td>
+                          <td>{k.opposing_party ?? "—"}</td>
+                          <td className="p-3">{k.responsible_lawyer ?? "—"}</td>
+                        </tr>
+                      ))}
               </tbody>
             </table>
           </div>

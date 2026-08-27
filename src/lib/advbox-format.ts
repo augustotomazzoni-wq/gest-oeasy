@@ -6,7 +6,7 @@ import * as XLSX from "xlsx";
  * para o Advbox) sem retrabalho.
  */
 
-export type AdvboxKind = "clientes" | "processos";
+export type AdvboxKind = "clientes" | "processos" | "financeiro";
 
 export type AdvClient = {
   name: string;
@@ -64,9 +64,50 @@ export type AdvCase = {
   notes: string | null;
 };
 
+/** Uma linha do resumo de receitas e despesas do Advbox. */
+export type AdvFinancialEntry = {
+  account: string | null;
+  cost_center: string | null;
+  sector: string | null;
+  /** "entrada" (RECEITA) ou "saida" (DESPESA), já traduzido. */
+  type: "entrada" | "saida";
+  due_date: string | null;
+  /** Competência no formato MM/AAAA, como o Advbox exporta. */
+  competence: string | null;
+  paid_on: string | null;
+  category: string | null;
+  description: string | null;
+  amount: number;
+  case_number: string | null;
+  parties: string | null;
+  /**
+   * Para onde a linha deve ir. Honorários e alvarás são receita de processo:
+   * entram pela tela de Acordos, viram parcela e o recebimento espelha no
+   * caixa sozinho. Lançar direto no caixa contaria o mesmo dinheiro duas
+   * vezes, então essas linhas ficam de fora da importação.
+   */
+  route: "caixa" | "acordos";
+  /**
+   * Impressão digital da linha. O Advbox não exporta um id, então este texto
+   * — montado sempre igual a partir do conteúdo — é o que impede a mesma
+   * linha de entrar duas vezes quando você reimporta o arquivo.
+   */
+  fingerprint: string;
+};
+
+/**
+ * Receita que nasce de processo (alvará, honorários de qualquer tipo,
+ * sucumbência) não entra pelo caixa — entra pelos Acordos.
+ */
+export function isReceitaDeProcesso(category: string | null): boolean {
+  const c = deaccent(category ?? "");
+  return c.includes("honorario") || c.includes("alvara") || c.includes("sucumbencia");
+}
+
 export type AdvboxParse =
   | { kind: "clientes"; clients: AdvClient[]; warnings: string[] }
-  | { kind: "processos"; cases: AdvCase[]; warnings: string[] };
+  | { kind: "processos"; cases: AdvCase[]; warnings: string[] }
+  | { kind: "financeiro"; entries: AdvFinancialEntry[]; warnings: string[] };
 
 /** Cabeçalhos exatos do Advbox, na ordem em que ele exporta. */
 export const CLIENT_HEADERS = [
@@ -177,6 +218,39 @@ export function onlyDigits(v: string | null | undefined): string {
   return String(v ?? "").replace(/\D/g, "");
 }
 
+/** Número ou zero — evita espalhar `?? 0` pelo código. */
+function num0(v: number | null): number {
+  return v ?? 0;
+}
+
+/**
+ * Chave estável de uma linha do financeiro. O Advbox não exporta id, então
+ * a identidade da linha é o próprio conteúdo: reimportar o mesmo arquivo
+ * (ou um arquivo maior que contenha os mesmos meses) não duplica nada.
+ * Descrição entra normalizada para não quebrar a chave por causa de um
+ * espaço a mais ou de uma diferença de maiúsculas.
+ */
+export function financialFingerprint(e: {
+  type: string;
+  due_date: string | null;
+  paid_on: string | null;
+  category: string | null;
+  description: string | null;
+  amount: number;
+  case_number: string | null;
+}): string {
+  return [
+    "advbox",
+    e.type,
+    e.due_date ?? "",
+    e.paid_on ?? "",
+    deaccent(e.category ?? ""),
+    deaccent(e.description ?? ""),
+    e.amount.toFixed(2),
+    onlyDigits(e.case_number),
+  ].join("|");
+}
+
 /** "MARIA DA SILVA (123.456.789-00)" → nome e CPF separados. */
 export function splitNameAndTaxId(raw: string): { name: string; tax_id: string | null } {
   const s = String(raw ?? "").trim();
@@ -194,9 +268,28 @@ function headerIndex(header: unknown[]): Map<string, number> {
   return map;
 }
 
-/** Descobre se a planilha é de clientes ou de processos pelo cabeçalho. */
+/** Cabeçalhos do resumo de receitas e despesas do Advbox. */
+export const FINANCIAL_HEADERS = [
+  "Conta/Cartão",
+  "Centro de custo",
+  "Setor/Unidade",
+  "Tipo",
+  "Vencimento",
+  "Competencia",
+  "Pagamento",
+  "Categoria",
+  "Descrição",
+  "Valor recebido",
+  "Valor pago",
+  "Processo",
+  "Partes",
+] as const;
+
+/** Descobre qual das três planilhas do Advbox é, pelo cabeçalho. */
 export function detectKind(header: unknown[]): AdvboxKind | null {
   const idx = headerIndex(header);
+  // O financeiro é o único que traz as duas colunas de valor separadas.
+  if (idx.has("valor recebido") && idx.has("valor pago")) return "financeiro";
   if (idx.has("nome do cliente") && idx.has("tipo de acao")) return "processos";
   if (idx.has("nome") && idx.has("cpf/cnpj")) return "clientes";
   return null;
@@ -217,7 +310,7 @@ export function parseAdvboxWorkbook(buffer: ArrayBuffer): AdvboxParse {
   const kind = detectKind(header);
   if (!kind) {
     throw new Error(
-      'Formato não reconhecido. Use a exportação do Advbox de Clientes (começa com "Nome") ou de Processos (começa com "Nome do cliente").',
+      'Formato não reconhecido. Use a exportação do Advbox de Clientes (começa com "Nome"), de Processos (começa com "Nome do cliente") ou o resumo de Receitas e Despesas (tem as colunas "Valor recebido" e "Valor pago").',
     );
   }
 
@@ -272,6 +365,81 @@ export function parseAdvboxWorkbook(buffer: ArrayBuffer): AdvboxParse {
     });
     if (!clients.length) warnings.push("Nenhum cliente encontrado na planilha.");
     return { kind, clients, warnings };
+  }
+
+  if (kind === "financeiro") {
+    const entries: AdvFinancialEntry[] = [];
+    const seenPrints = new Map<string, number>();
+    let semTipo = 0;
+    let semValor = 0;
+    let semData = 0;
+    let repetidas = 0;
+
+    body.forEach((row, n) => {
+      const linha = n + 2;
+      const rawType = deaccent(String(at(row, "Tipo") ?? ""));
+      if (!rawType) return;
+
+      const isReceita = rawType.startsWith("receita");
+      const isDespesa = rawType.startsWith("despesa");
+      if (!isReceita && !isDespesa) {
+        semTipo += 1;
+        return;
+      }
+
+      // A planilha separa em duas colunas; sobra a que corresponde ao tipo.
+      const recebido = toNumber(at(row, "Valor recebido"));
+      const pago = toNumber(at(row, "Valor pago"));
+      const amount = Math.abs(num0(isReceita ? recebido : pago) || num0(recebido) || num0(pago));
+      if (!amount) {
+        semValor += 1;
+        return;
+      }
+
+      const dueDate = toISODate(at(row, "Vencimento"));
+      const paidOn = toISODate(at(row, "Pagamento"));
+      if (!dueDate && !paidOn) {
+        semData += 1;
+        return;
+      }
+
+      const entry: AdvFinancialEntry = {
+        account: text(at(row, "Conta/Cartão")),
+        cost_center: text(at(row, "Centro de custo")),
+        sector: text(at(row, "Setor/Unidade")),
+        type: isReceita ? "entrada" : "saida",
+        due_date: dueDate,
+        competence: text(at(row, "Competencia")) ?? text(at(row, "Competência")),
+        paid_on: paidOn,
+        category: text(at(row, "Categoria")),
+        description: text(at(row, "Descrição")),
+        amount,
+        case_number: text(at(row, "Processo")),
+        parties: text(at(row, "Partes")),
+        route:
+          isReceita && isReceitaDeProcesso(text(at(row, "Categoria"))) ? "acordos" : "caixa",
+        fingerprint: "",
+      };
+      entry.fingerprint = financialFingerprint(entry);
+
+      const antes = seenPrints.get(entry.fingerprint);
+      if (antes) {
+        repetidas += 1;
+        warnings.push(
+          `Linha ${linha}: repete exatamente a linha ${antes} (mesmo tipo, data, categoria e valor) — será importada uma vez só.`,
+        );
+        return;
+      }
+      seenPrints.set(entry.fingerprint, linha);
+      entries.push(entry);
+    });
+
+    if (semTipo) warnings.push(`${semTipo} linha(s) ignorada(s): coluna "Tipo" não é RECEITA nem DESPESA.`);
+    if (semValor) warnings.push(`${semValor} linha(s) ignorada(s) por não ter valor.`);
+    if (semData) warnings.push(`${semData} linha(s) ignorada(s) por não ter vencimento nem pagamento.`);
+    if (repetidas) warnings.push(`${repetidas} linha(s) repetida(s) no arquivo foram descartadas.`);
+    if (!entries.length) warnings.push("Nenhum lançamento encontrado na planilha.");
+    return { kind, entries, warnings };
   }
 
   const cases: AdvCase[] = [];
