@@ -83,6 +83,55 @@ type ScheduleRow = {
 const cents = (value: number) => Math.max(0, Math.round(num(value) * 100));
 const fromCents = (value: number) => value / 100;
 
+/**
+ * Tolerância de centavos.
+ *
+ * Dividir R$ 10.000,00 em 3 parcelas dá 3.333,33 + 3.333,33 + 3.333,34, e
+ * repartir cada uma entre escritório e cliente por percentual gera mais
+ * arredondamento ainda. Exigir fechamento exato ao centavo travava o cadastro
+ * por uma diferença que ninguém consegue resolver na mão.
+ *
+ * O limite cresce com o número de parcelas porque cada uma pode contribuir com
+ * um centavo de arredondamento.
+ */
+const TOLERANCIA_LINHA = 0.05;
+const toleranciaTotal = (linhas: number) => Math.max(0.05, linhas * 0.01);
+
+/**
+ * Encosta os centavos que sobraram na parte do escritório, para o que é
+ * gravado no banco fechar exato. Só mexe no que estiver dentro da tolerância —
+ * diferença grande continua sendo erro, e o cadastro não passa.
+ *
+ * O escritório é quem absorve a sobra porque é a única parte que não vira
+ * obrigação de repasse: um centavo a mais ou a menos na conta da cliente
+ * viraria uma pendência de repasse que nunca fecha.
+ */
+function ajustarCentavos(rows: ScheduleRow[]): ScheduleRow[] {
+  return rows.map((row) => {
+    const parts = row.firm_amount + row.client_amount + row.cost_reimbursement;
+    const diff = round2(row.gross_amount - parts);
+    if (diff === 0 || Math.abs(diff) > TOLERANCIA_LINHA) return row;
+
+    // Some ao escritório, a menos que isso o deixe negativo — aí sobra para a
+    // cliente, que é quem tem valor naquela linha.
+    if (row.firm_amount + diff >= 0) {
+      return { ...row, firm_amount: round2(row.firm_amount + diff) };
+    }
+    if (row.client_amount + diff >= 0) {
+      return { ...row, client_amount: round2(row.client_amount + diff) };
+    }
+    return { ...row, gross_amount: round2(parts) };
+  });
+}
+
+const round2 = (value: number) => Math.round(num(value) * 100) / 100;
+
+/** "faltam R$ 0,02" / "sobram R$ 0,05" — o que o usuário precisa saber. */
+function faltaOuSobra(atual: number, alvo: number): string {
+  const diff = round2(alvo - atual);
+  return diff > 0 ? `faltam ${money(diff)}` : `sobram ${money(-diff)}`;
+}
+
 function allocateByCapacity(
   capacities: number[],
   totals: { firm: number; client: number; costs: number },
@@ -457,6 +506,16 @@ function AcordosPage() {
     [schedule],
   );
 
+  // Quanto de centavo ainda está solto no cronograma — é o que o ajuste
+  // automático vai encostar no escritório na hora de gravar.
+  const centavosPendentes = useMemo(() => {
+    if (form.no_schedule) return 0;
+    return schedule.reduce((maior, row) => {
+      const parts = row.firm_amount + row.client_amount + row.cost_reimbursement;
+      return Math.max(maior, Math.abs(round2(row.gross_amount - parts)));
+    }, 0);
+  }, [form.no_schedule, schedule]);
+
   const scheduleErrors = useMemo(() => {
     if (form.no_schedule) return [];
     const errors: string[] = [];
@@ -467,33 +526,50 @@ function AcordosPage() {
       errors.push("A entrada não pode ser maior que o total a receber.");
     if (!schedule.length) errors.push("Crie ao menos uma parcela para o cronograma.");
 
+    const tolTotal = toleranciaTotal(schedule.length);
+
     schedule.forEach((row, index) => {
+      const nome = row.label || `Parcela ${index + 1}`;
       const parts = row.firm_amount + row.client_amount + row.cost_reimbursement;
-      if (!row.due_date) errors.push(`${row.label || `Parcela ${index + 1}`}: informe a data.`);
-      if (row.gross_amount <= 0)
-        errors.push(`${row.label || `Parcela ${index + 1}`}: informe um valor maior que zero.`);
-      if (Math.abs(row.gross_amount - parts) > 0.01)
-        errors.push(`${row.label || `Parcela ${index + 1}`}: a divisão não fecha com o total.`);
+      if (!row.due_date) errors.push(`${nome}: informe a data.`);
+      if (row.gross_amount <= 0) errors.push(`${nome}: informe um valor maior que zero.`);
+      if (Math.abs(row.gross_amount - parts) > TOLERANCIA_LINHA)
+        errors.push(
+          `${nome}: escritório + cliente + reembolso somam ${money(parts)}, ` +
+            `mas a parcela é de ${money(row.gross_amount)} — ${faltaOuSobra(parts, row.gross_amount)}.`,
+        );
     });
 
-    if (Math.abs(scheduleTotals.gross - expectedTotal) > 0.01)
-      errors.push("A soma das parcelas não fecha com o total a receber.");
-    if (Math.abs(scheduleTotals.firm - firm) > 0.01)
-      errors.push("A soma destinada ao escritório não fecha com o valor esperado.");
-    if (Math.abs(scheduleTotals.client - clientNoCronograma) > 0.01)
-      errors.push("A soma destinada ao cliente não fecha com o valor esperado.");
-    if (Math.abs(scheduleTotals.costs - costs) > 0.01)
-      errors.push("A soma dos reembolsos não fecha com o valor esperado.");
+    if (Math.abs(scheduleTotals.gross - expectedTotal) > tolTotal)
+      errors.push(
+        `As parcelas somam ${money(scheduleTotals.gross)} e o total a receber é ` +
+          `${money(expectedTotal)} — ${faltaOuSobra(scheduleTotals.gross, expectedTotal)} no cronograma.`,
+      );
+    if (Math.abs(scheduleTotals.firm - firm) > tolTotal)
+      errors.push(
+        `A coluna Escritório soma ${money(scheduleTotals.firm)} e o esperado é ${money(firm)} — ` +
+          `${faltaOuSobra(scheduleTotals.firm, firm)}.`,
+      );
+    if (Math.abs(scheduleTotals.client - clientNoCronograma) > tolTotal)
+      errors.push(
+        `A coluna Cliente soma ${money(scheduleTotals.client)} e o esperado é ` +
+          `${money(clientNoCronograma)} — ${faltaOuSobra(scheduleTotals.client, clientNoCronograma)}.`,
+      );
+    if (Math.abs(scheduleTotals.costs - costs) > tolTotal)
+      errors.push(
+        `A coluna Reembolso soma ${money(scheduleTotals.costs)} e o esperado é ${money(costs)} — ` +
+          `${faltaOuSobra(scheduleTotals.costs, costs)}.`,
+      );
     // Com a cliente recebendo direto, o cronograma vale menos que o acordo de
     // propósito — a conferência com o valor bruto não se aplica.
-    if (!clienteRecebeDireto && gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > 0.01)
+    if (!clienteRecebeDireto && gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > tolTotal)
       errors.push(
         `O total distribuído (${money(expectedTotal)}) não fecha com o valor bruto` +
-          `${successInsideGross ? "" : " + sucumbência"} (${money(expectedGrossTotal)}).`,
+          `${successInsideGross ? "" : " + sucumbência"} (${money(expectedGrossTotal)}) — ` +
+          `${faltaOuSobra(expectedTotal, expectedGrossTotal)} na divisão entre escritório e cliente.`,
       );
     return [...new Set(errors)];
   }, [
-    client,
     clientNoCronograma,
     clienteRecebeDireto,
     costs,
@@ -508,10 +584,55 @@ function AcordosPage() {
     scheduleTotals,
   ]);
 
+  /**
+   * Preenche sozinha a coluna que sobrou.
+   *
+   * Digitado o total da parcela, ao informar a parte do escritório a parte da
+   * cliente já aparece com o que falta — e vice-versa. É sugestão: continua
+   * dando para digitar por cima, e o campo que a pessoa acabou de mexer nunca
+   * é alterado.
+   *
+   * Quando não existe parte da cliente no cronograma (honorário de serviço, ou
+   * a cliente recebendo direto da empresa) tudo o que sobra é do escritório.
+   */
+  function completarLinha(row: ScheduleRow, patch: Partial<ScheduleRow>): ScheduleRow {
+    const atualizada = { ...row, ...patch };
+    const mexeuEmDinheiro =
+      "gross_amount" in patch || "firm_amount" in patch || "client_amount" in patch ||
+      "cost_reimbursement" in patch;
+    if (!mexeuEmDinheiro) return atualizada;
+
+    // Sucumbência é paga direto ao escritório: não há o que repartir.
+    const semParteDaCliente = row.stream === "sucumbencia" || clientNoCronograma <= 0.01;
+    const sobra = (menos: number) => Math.max(round2(atualizada.gross_amount - menos), 0);
+
+    if (semParteDaCliente) {
+      return {
+        ...atualizada,
+        client_amount: 0,
+        firm_amount: sobra(atualizada.cost_reimbursement),
+      };
+    }
+
+    // Mexeu na parte da cliente → o escritório recebe o resto.
+    if ("client_amount" in patch) {
+      return {
+        ...atualizada,
+        firm_amount: sobra(atualizada.client_amount + atualizada.cost_reimbursement),
+      };
+    }
+
+    // Mexeu no total, no escritório ou no reembolso → a cliente recebe o resto.
+    return {
+      ...atualizada,
+      client_amount: sobra(atualizada.firm_amount + atualizada.cost_reimbursement),
+    };
+  }
+
   function updateScheduleRow(index: number, patch: Partial<ScheduleRow>) {
     setEditedSchedule((current) =>
       (current ?? generatedSchedule).map((row, rowIndex) =>
-        rowIndex === index ? { ...row, ...patch } : row,
+        rowIndex === index ? completarLinha(row, patch) : row,
       ),
     );
   }
@@ -556,20 +677,42 @@ function AcordosPage() {
         throw new Error("Justifique a alteração manual dos valores calculados");
       if (scheduleErrors.length) throw new Error(scheduleErrors[0]);
 
-      const successForSchedule = Math.min(successFee, firm);
-      const feeForSchedule = Math.max(firm - successForSchedule, 0);
+      // Passou na validação com alguns centavos de diferença: encosta a sobra
+      // no escritório e usa a soma real das parcelas como valor esperado do
+      // acordo. Assim o que fica gravado fecha exato, e nenhuma parcela nasce
+      // com uma pendência de um centavo que nunca vai ser paga.
+      const gravar = ajustarCentavos(schedule);
+      const totalGravado = gravar.reduce(
+        (t, row) => ({
+          firm: round2(t.firm + row.firm_amount),
+          client: round2(t.client + row.client_amount),
+          costs: round2(t.costs + row.cost_reimbursement),
+        }),
+        { firm: 0, client: 0, costs: 0 },
+      );
+      // Sem cronograma não há o que conferir: valem os valores digitados.
+      const firmGravado = gravar.length ? totalGravado.firm : firm;
+      const clientGravado = gravar.length
+        ? clienteRecebeDireto
+          ? client
+          : totalGravado.client
+        : client;
+      const costsGravado = gravar.length ? totalGravado.costs : costs;
+
+      const successForSchedule = Math.min(successFee, firmGravado);
+      const feeForSchedule = Math.max(firmGravado - successForSchedule, 0);
       // Com as trilhas separadas cada parcela já nasce pura: a do acordo é
       // toda honorário contratual, a da sucumbência é toda sucumbência.
       // Sem separação, mantém o rateio proporcional de antes.
-      const firmComponents = !schedule.length
+      const firmComponents = !gravar.length
         ? []
         : successSeparated
-          ? schedule.map((row) =>
+          ? gravar.map((row) =>
               row.stream === "sucumbencia"
                 ? { fee_amount: 0, success_fee_amount: row.firm_amount }
                 : { fee_amount: row.firm_amount, success_fee_amount: 0 },
             )
-          : splitFirmComponents(schedule, feeForSchedule, successForSchedule);
+          : splitFirmComponents(gravar, feeForSchedule, successForSchedule);
 
       // Acordo e cronograma são gravados em uma única transação no banco:
       // se a criação das parcelas falhar, o acordo também não é criado —
@@ -587,17 +730,17 @@ function AcordosPage() {
         _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
         _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
         _success_fee_amount: successFee,
-        _cost_reimbursement: costs,
-        _expected_firm_amount: firm,
-        _expected_client_amount: client,
+        _cost_reimbursement: costsGravado,
+        _expected_firm_amount: firmGravado,
+        _expected_client_amount: clientGravado,
         _agreement_date: form.agreement_date || undefined,
         _flow: form.flow,
         _is_estimated: form.is_estimated,
         _manual_override_reason: overridden ? form.override_reason.trim() : undefined,
-        _installments: schedule.map((s, index) => ({
+        _installments: gravar.map((s, index) => ({
           label: s.label,
           number: s.number,
-          total_count: schedule.length,
+          total_count: gravar.length,
           due_date: s.due_date,
           stream: s.stream ?? "principal",
           gross_amount: s.gross_amount,
@@ -1285,6 +1428,15 @@ function AcordosPage() {
                           Itens do cronograma: <strong>{schedule.length}</strong>
                         </p>
                       </div>
+
+                      {centavosPendentes > 0 && scheduleErrors.length === 0 && (
+                        <p className="mt-2 rounded-md border border-border bg-background p-2 text-xs">
+                          Sobrou uma diferença de{" "}
+                          <strong className="num">{money(centavosPendentes)}</strong> por causa do
+                          arredondamento das parcelas. Pode confirmar: o sistema encosta esses
+                          centavos na parte do escritório para o acordo fechar exato.
+                        </p>
+                      )}
                     </div>
 
                     {!form.no_schedule && (

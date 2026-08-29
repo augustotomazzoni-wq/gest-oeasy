@@ -1554,7 +1554,7 @@ export type Database = {
       }
       delete_loan: {
         Args: { _loan_id: string }
-        Returns: number
+        Returns: Json
       }
       create_transfer_from_receipt: {
         Args: { _receipt_id: string; _scheduled_for?: string }

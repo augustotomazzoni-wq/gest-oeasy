@@ -79,13 +79,14 @@ function useDashboardData() {
   return useQuery({
     queryKey: ["dashboard"],
     queryFn: async () => {
-      const [inst, balances, banks, txs, receivables, activeCases] = await Promise.all([
+      const [inst, balances, banks, txs, receivables, activeCases, receipts] =
+        await Promise.all([
         supabase.from("v_installments").select("*"),
         supabase.from("v_client_balances").select("*"),
         supabase.from("v_bank_balances").select("*"),
         supabase
           .from("financial_transactions")
-          .select("id, type, amount, paid_on, status, description")
+          .select("id, type, amount, paid_on, status, description, is_financing")
           .eq("status", "pago"),
         supabase
           .from("legal_receivables")
@@ -96,6 +97,15 @@ function useDashboardData() {
           .select("id", { count: "exact", head: true })
           .eq("status", "ativo")
           .is("deleted_at", null),
+        // O dinheiro de terceiros precisa vir do recebimento, não da parcela:
+        // a parcela só sabe quanto é da cliente, não se passou pela conta do
+        // escritório ou se ela recebeu direto da empresa.
+        supabase
+          .from("receipts")
+          .select(
+            "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
+          )
+          .is("reversed_at", null),
       ]);
       if (inst.error) throw inst.error;
       return {
@@ -105,6 +115,7 @@ function useDashboardData() {
         txs: txs.data ?? [],
         receivables: receivables.data ?? [],
         activeCasesCount: activeCases.count ?? 0,
+        receipts: receipts.data ?? [],
       };
     },
   });
@@ -124,8 +135,9 @@ function usePeriodData(start: string, end: string) {
         supabase
           .from("receipts")
           .select(
-            "fee_amount, success_fee_amount, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id))",
+            "fee_amount, success_fee_amount, cost_reimbursement, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id))",
           )
+          .is("reversed_at", null)
           .gte("received_on", start)
           .lte("received_on", end),
         supabase
@@ -138,6 +150,30 @@ function usePeriodData(start: string, end: string) {
       if (receipts.error) throw receipts.error;
       if (txs.error) throw txs.error;
       return { receipts: receipts.data ?? [], txs: txs.data ?? [] };
+    },
+  });
+}
+
+/**
+ * Recebimentos de um intervalo, para o gráfico "escritório x terceiros".
+ * Ele tem filtro próprio porque a pergunta que responde é outra: não é o
+ * resultado do mês, é quanto do dinheiro que passou pelas mãos do escritório
+ * era dele e quanto era das clientes, no recorte que se quiser olhar.
+ */
+function useMixData(start: string, end: string) {
+  return useQuery({
+    queryKey: ["dashboard-mix", start, end],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("receipts")
+        .select(
+          "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
+        )
+        .is("reversed_at", null)
+        .gte("received_on", start)
+        .lte("received_on", end);
+      if (error) throw error;
+      return data ?? [];
     },
   });
 }
@@ -206,6 +242,15 @@ function Dashboard() {
   const { start: periodStart, end: periodEnd } = periodRange(periodType, anchor, custom);
   const { data: periodData, isLoading: periodLoading } = usePeriodData(periodStart, periodEnd);
 
+  // Filtro exclusivo do gráfico "escritório x terceiros".
+  const [mixType, setMixType] = useState<PeriodType>("ano");
+  const [mixAnchor, setMixAnchor] = useState(today);
+  const [mixStart, setMixStart] = useState(startOfYearISO(today));
+  const [mixEnd, setMixEnd] = useState(today);
+  const mixCustom = { start: mixStart, end: mixEnd };
+  const mixRange = periodRange(mixType, mixAnchor, mixCustom);
+  const { data: mixData, isLoading: mixLoading } = useMixData(mixRange.start, mixRange.end);
+
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">Carregando indicadores…</p>;
   }
@@ -246,14 +291,31 @@ function Dashboard() {
     .reduce((s, t) => s + num(t.amount), 0);
   // Tudo que entrou de fato na conta como dinheiro do escritório: honorários e
   // sucumbência somados a empréstimos, aportes de sócio e qualquer outra
-  // entrada lançada no caixa. Dinheiro de terceiros continua fora — ele passa
-  // pela conta, mas é da cliente.
-  const periodCashIn = (periodData?.txs ?? [])
+  // entrada lançada no caixa.
+  //
+  // O desconto do dinheiro das clientes no fim é o que conserta o indicador.
+  // Num recebimento misto — parte honorário, parte da cliente — o caixa
+  // registra o valor cheio que caiu na conta, com o tipo "entrada". Somar
+  // essas entradas sem descontar fazia a parte da cliente ser contada como
+  // dinheiro do escritório, e ainda aparecer no rodapé como se fosse
+  // empréstimo ou aporte.
+  const periodEntradas = (periodData?.txs ?? [])
     .filter((t) => t.type === "entrada")
     .reduce((s, t) => s + num(t.amount), 0);
-  // A diferença entre o que entrou no caixa e o que é honorário/sucumbência:
-  // é o dinheiro que entrou sem vir de processo.
-  const periodNonFeeIn = Math.max(periodCashIn - periodFirmRevenue, 0);
+  // Só desconta o dinheiro da cliente que veio grudado numa entrada do
+  // escritório. Recebimento que é puro dinheiro de terceiro já entra no caixa
+  // com o tipo "entrada_de_terceiros" e nunca foi somado acima — descontar
+  // esse também tiraria duas vezes.
+  const periodClientDentroDeEntrada = (periodData?.receipts ?? [])
+    .filter(
+      (r) =>
+        num(r.fee_amount) + num(r.success_fee_amount) + num(r.cost_reimbursement) > 0.01,
+    )
+    .reduce((s, r) => s + num(r.client_amount_received_by_firm), 0);
+  const periodCashIn = Math.max(periodEntradas - periodClientDentroDeEntrada, 0);
+  // Só para saber se a frase sobre empréstimo deve aparecer — o valor em si
+  // não vai para a tela.
+  const periodTemEmprestimo = periodFinancingIn > 0.01;
   const periodProfit = periodFirmRevenue - periodExpenses;
   const activeCases = d.activeCasesCount;
   const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
@@ -279,9 +341,23 @@ function Dashboard() {
     (s, i) => s + num(i.paid_fee) + num(i.paid_success_fee),
     0,
   );
-  const thirdPartyReceived = d.installments.reduce((s, i) => s + num(i.paid_client), 0);
+  // Terceiros que passaram pelo caixa é só o que caiu na conta do escritório.
+  // A parcela guarda o valor da cliente inteiro, inclusive o que ela recebeu
+  // direto da empresa e nunca chegou perto do nosso banco — por isso o número
+  // vem do recebimento, não da parcela.
+  const thirdPartyReceived = d.receipts.reduce(
+    (s, r) => s + num(r.client_amount_received_by_firm as number),
+    0,
+  );
+  const thirdPartyDirect = d.receipts.reduce(
+    (s, r) => s + num(r.client_amount_received_direct as number),
+    0,
+  );
+  // Parcela de empréstimo sai daqui pelo mesmo motivo que sai do lucro do
+  // período: é devolução de dinheiro emprestado, não custo de operação.
+  // Somá-la aqui deixava esta despesa maior que a do card de cima.
   const expenses = d.txs
-    .filter((t) => t.type === "saida")
+    .filter((t) => t.type === "saida" && !t.is_financing)
     .reduce((s, t) => s + num(t.amount as number), 0);
   const transferred = d.balances.reduce((s, b) => s + num(b.transferred as number), 0);
   const pendingTransfer = d.balances.reduce((s, b) => s + num(b.pending_transfer as number), 0);
@@ -300,6 +376,16 @@ function Dashboard() {
   const estimated = d.receivables
     .filter((r) => r.is_estimated)
     .reduce((s, r) => s + num(r.expected_firm_amount as number), 0);
+
+  // Números do gráfico "escritório x terceiros", no recorte só dele.
+  const mixFirm = (mixData ?? []).reduce(
+    (s, r) => s + num(r.fee_amount as number) + num(r.success_fee_amount as number),
+    0,
+  );
+  const mixThird = (mixData ?? []).reduce(
+    (s, r) => s + num(r.client_amount_received_by_firm as number),
+    0,
+  );
 
   const late = d.installments.filter((i) => i.status === "ATRASADA");
   const next7 = d.installments.filter(
@@ -332,13 +418,23 @@ function Dashboard() {
     aging[idx]!.valor += num(i.balance);
   }
 
-  // Previsão por mês (próximos 6 meses)
+  // Previsão por mês (próximos 6 meses) — só a parte do escritório.
+  // O saldo cheio da parcela inclui o dinheiro da cliente, que entra e sai
+  // para o repasse: prever com ele dava um gráfico de recebimento maior do
+  // que qualquer coisa que o escritório vai realmente ficar.
+  const firmBalanceOf = (i: InstallmentRow) =>
+    Math.max(
+      num(i.fee_amount) + num(i.success_fee_amount) - num(i.paid_fee) - num(i.paid_success_fee),
+      0,
+    );
   const forecastMap = new Map<string, number>();
   for (const i of d.installments) {
     if (!i.due_date || ["PAGA", "CANCELADA"].includes(i.status)) continue;
     if (daysBetween(today, i.due_date) < 0) continue;
+    const firmDue = firmBalanceOf(i);
+    if (firmDue <= 0.01) continue;
     const key = i.due_date.slice(0, 7);
-    forecastMap.set(key, (forecastMap.get(key) ?? 0) + num(i.balance));
+    forecastMap.set(key, (forecastMap.get(key) ?? 0) + firmDue);
   }
   const forecast = [...forecastMap.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
@@ -427,15 +523,18 @@ function Dashboard() {
               {periodLoading ? "…" : money(periodCashIn)}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {periodNonFeeIn > 0.01
-                ? `Inclui ${money(periodNonFeeIn)} de empréstimos, aportes e outras entradas`
-                : "Empréstimos e aportes entram aqui"}
+              {periodTemEmprestimo
+                ? "Tem dinheiro de empréstimo somado aqui. Sem o dinheiro das clientes."
+                : "Empréstimos e aportes entram aqui. Sem o dinheiro das clientes."}
             </p>
           </div>
           <div className="panel p-4">
             <p className="text-xs text-muted-foreground uppercase">Despesas pagas</p>
             <p className="num mt-1 text-xl font-semibold text-destructive">
               {periodLoading ? "…" : money(periodExpenses)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Sem as parcelas de empréstimo
             </p>
           </div>
           <div className="panel p-4">
@@ -530,7 +629,12 @@ function Dashboard() {
           hint="Honorários + sucumbência recebidos"
           tone="success"
         />
-        <Card label="Despesas pagas" value={money(expenses)} to="/caixa" />
+        <Card
+          label="Despesas pagas"
+          value={money(expenses)}
+          hint="Sem as parcelas de empréstimo"
+          to="/caixa"
+        />
         <Card
           label="Resultado de caixa"
           value={money(firmRevenue - expenses)}
@@ -577,7 +681,11 @@ function Dashboard() {
         <Card
           label="Terceiros recebidos"
           value={money(thirdPartyReceived)}
-          hint="Valores de clientes que passaram pelo caixa"
+          hint={
+            thirdPartyDirect > 0.01
+              ? `Passaram pelo caixa — outros ${money(thirdPartyDirect)} foram direto às clientes`
+              : "Valores de clientes que passaram pelo caixa"
+          }
         />
       </div>
 
@@ -603,6 +711,9 @@ function Dashboard() {
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <div className="panel p-4">
           <h2 className="font-display text-sm font-semibold">Previsão de recebimentos</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Só a parte do escritório — honorários e sucumbência ainda em aberto.
+          </p>
           <div className="mt-4 h-64">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={forecast}>
@@ -632,15 +743,32 @@ function Dashboard() {
         </div>
 
         <div className="panel p-4">
-          <h2 className="font-display text-sm font-semibold">
-            Receita do escritório x valores de terceiros
-          </h2>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-semibold">
+                Receita do escritório x valores de terceiros
+              </h2>
+              <p className="num mt-1 text-xs text-muted-foreground">
+                {periodLabel(mixType, mixAnchor, mixCustom)}
+              </p>
+            </div>
+            <PeriodFilter
+              type={mixType}
+              onTypeChange={setMixType}
+              anchor={mixAnchor}
+              onAnchorChange={setMixAnchor}
+              customStart={mixStart}
+              customEnd={mixEnd}
+              onCustomStartChange={setMixStart}
+              onCustomEndChange={setMixEnd}
+            />
+          </div>
           <div className="mt-4 h-64">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={[
-                  { nome: "Escritório", valor: firmRevenue },
-                  { nome: "Terceiros (clientes)", valor: thirdPartyReceived },
+                  { nome: "Escritório", valor: mixFirm },
+                  { nome: "Terceiros (clientes)", valor: mixThird },
                 ]}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
@@ -651,6 +779,11 @@ function Dashboard() {
               </BarChart>
             </ResponsiveContainer>
           </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {mixLoading
+              ? "Carregando…"
+              : "Terceiros conta só o que passou pela conta do escritório e ainda vai para repasse."}
+          </p>
         </div>
 
         <div className="panel p-4">

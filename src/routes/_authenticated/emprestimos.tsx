@@ -297,11 +297,25 @@ function EmprestimosPage() {
   const remove = useMutation({
     mutationFn: async () => {
       if (!deleteTarget) throw new Error("Empréstimo inválido");
-      const { error } = await supabase.rpc("delete_loan", { _loan_id: deleteTarget.id });
+      const { data: resumo, error } = await supabase.rpc("delete_loan", {
+        _loan_id: deleteTarget.id,
+      });
       if (error) throw error;
+      return resumo as unknown as {
+        pagos: number;
+        previstos: number;
+        entrou: number;
+        saiu: number;
+      } | null;
     },
-    onSuccess: () => {
-      toast.success("Empréstimo apagado. As parcelas já pagas foram mantidas no caixa.");
+    onSuccess: (r) => {
+      const mexeuNoCaixa = num(r?.entrou) + num(r?.saiu);
+      toast.success("Empréstimo apagado com todos os lançamentos dele.", {
+        description:
+          mexeuNoCaixa > 0.01
+            ? `${money(num(r?.entrou))} de entrada e ${money(num(r?.saiu))} de parcelas pagas saíram do fluxo de caixa.`
+            : undefined,
+      });
       setDeleteTarget(null);
       void qc.invalidateQueries();
     },
@@ -848,9 +862,9 @@ function EmprestimosPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Apagar o empréstimo de {deleteTarget?.lender}?</AlertDialogTitle>
             <AlertDialogDescription>
-              As parcelas que ainda não foram pagas somem do caixa. As que já foram pagas
-              permanecem, porque o dinheiro saiu de verdade — elas só deixam de ficar ligadas a
-              este empréstimo.
+              Some tudo o que nasceu deste empréstimo: a entrada do dinheiro recebido e todas as
+              parcelas, pagas ou não. O saldo das contas muda na hora. Fica registrado no log de
+              auditoria o que foi apagado.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
