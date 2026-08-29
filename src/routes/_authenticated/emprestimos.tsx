@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, addMonthsISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
+import { downloadXlsxSheets } from "@/lib/export-xlsx";
+import { parseLoanWorkbook, loanTemplateRows } from "@/lib/loan-import";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/emprestimos")({
@@ -123,7 +125,10 @@ function EmprestimosPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
-  const [modo, setModo] = useState<"iguais" | "colar">("iguais");
+  const [modo, setModo] = useState<"iguais" | "colar" | "arquivo">("iguais");
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importado, setImportado] = useState<Parcela[] | null>(null);
+  const [avisos, setAvisos] = useState<string[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<LoanRow | null>(null);
 
   const { data, isLoading } = useQuery({
@@ -161,6 +166,14 @@ function EmprestimosPage() {
 
   /** As parcelas que serão criadas, conforme o modo escolhido. */
   const parcelas = useMemo<Parcela[]>(() => {
+    if (modo === "arquivo") {
+      // A planilha do banco costuma vir sem as datas (definidas no depósito):
+      // nesse caso os vencimentos seguem mês a mês do 1º informado na tela.
+      return (importado ?? []).map((p, i) => ({
+        due_date: p.due_date || addMonthsISO(form.first_due, i),
+        amount: p.amount,
+      }));
+    }
     if (modo === "colar") return parseParcelasColadas(form.pasted, form.first_due);
     const n = Math.max(1, Math.floor(num(Number(form.parcels))));
     const valor = num(Number(form.parcel_amount));
@@ -169,11 +182,44 @@ function EmprestimosPage() {
       due_date: addMonthsISO(form.first_due, i),
       amount: valor,
     }));
-  }, [modo, form.pasted, form.first_due, form.parcels, form.parcel_amount]);
+  }, [modo, form.pasted, form.first_due, form.parcels, form.parcel_amount, importado]);
 
   const totalParcelas = parcelas.reduce((s, p) => s + p.amount, 0);
   const recebido = num(Number(form.amount_received));
   const custoDoDinheiro = totalParcelas - recebido;
+
+  /** Lê a planilha do empréstimo e já preenche o que veio nela. */
+  async function lerArquivo(file: File) {
+    try {
+      const r = parseLoanWorkbook(await file.arrayBuffer());
+      setImportado(r.parcels.map((p) => ({ due_date: p.due_date ?? "", amount: p.amount })));
+      setAvisos(r.warnings);
+      setForm((f) => ({
+        ...f,
+        lender: r.lender ?? f.lender,
+        contract_number: r.contract_number ?? f.contract_number,
+        amount_received: r.amount_received ? String(r.amount_received) : f.amount_received,
+        received_on: r.received_on ?? f.received_on,
+        notes: r.notes ?? f.notes,
+      }));
+      toast.success(`${r.parcels.length} parcela(s) lida(s) da planilha.`);
+    } catch (e) {
+      setImportado(null);
+      setAvisos([]);
+      if (fileRef.current) fileRef.current.value = "";
+      toast.error("Não foi possível ler a planilha", { description: (e as Error).message });
+    }
+  }
+
+  /** Baixa o modelo em branco para o escritório preencher. */
+  function baixarModelo() {
+    const t = loanTemplateRows();
+    downloadXlsxSheets("modelo_emprestimo.xlsx", [
+      { name: "Emprestimo", rows: t.emprestimo },
+      { name: "Parcelas", rows: t.parcelas },
+    ]);
+    toast.success("Modelo baixado.");
+  }
 
   const create = useMutation({
     mutationFn: async () => {
@@ -431,9 +477,61 @@ function EmprestimosPage() {
               >
                 Colar tabela do contrato
               </Button>
+              <Button
+                size="sm"
+                variant={modo === "arquivo" ? "default" : "outline"}
+                onClick={() => setModo("arquivo")}
+              >
+                Importar planilha
+              </Button>
             </div>
 
-            {modo === "iguais" ? (
+            {modo === "arquivo" ? (
+              <div className="space-y-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="arq">Planilha do empréstimo</Label>
+                    <Input
+                      id="arq"
+                      ref={fileRef}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) void lerArquivo(f);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pv3">1º vencimento</Label>
+                    <Input
+                      id="pv3"
+                      type="date"
+                      value={form.first_due}
+                      onChange={(e) => setForm({ ...form, first_due: e.target.value })}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Usado só nas parcelas que vierem sem data.
+                    </p>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" onClick={baixarModelo}>
+                  Baixar modelo em branco
+                </Button>
+                {avisos.length > 0 && (
+                  <ul className="list-disc space-y-1 rounded-md border border-warning/40 p-3 pl-7 text-xs text-muted-foreground">
+                    {avisos.map((a) => (
+                      <li key={a}>{a}</li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  A planilha tem duas abas: <strong>Emprestimo</strong> (credor, contrato, valor
+                  recebido e data) e <strong>Parcelas</strong> (nº, vencimento e valor). O que
+                  vier preenchido na primeira aba já cai nos campos acima.
+                </p>
+              </div>
+            ) : modo === "iguais" ? (
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-2">
                   <Label htmlFor="np">Nº de parcelas</Label>

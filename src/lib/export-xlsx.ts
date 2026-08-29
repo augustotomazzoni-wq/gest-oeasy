@@ -7,3 +7,15 @@ export function downloadXlsx(filename: string, sheetName: string, rows: Record<s
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
   XLSX.writeFile(wb, filename);
 }
+
+/** Mesma coisa, com várias abas de uma vez. */
+export function downloadXlsxSheets(
+  filename: string,
+  sheets: { name: string; rows: Record<string, unknown>[] }[],
+) {
+  const wb = XLSX.utils.book_new();
+  for (const sheet of sheets) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet.rows), sheet.name);
+  }
+  XLSX.writeFile(wb, filename);
+}
