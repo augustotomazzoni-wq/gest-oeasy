@@ -72,6 +72,20 @@ type LoanRow = {
 
 type Parcela = { due_date: string; amount: number };
 
+/** Uma parcela do empréstimo, do jeito que ela vive no fluxo de caixa. */
+type ParcelaTx = {
+  id: string;
+  loan_id: string;
+  type: string;
+  status: string;
+  amount: number;
+  due_date: string | null;
+  paid_on: string | null;
+  recurrence_index: number | null;
+  recurrence_total: number | null;
+  description: string;
+};
+
 const EMPTY = {
   lender: "",
   contract_number: "",
@@ -130,6 +144,10 @@ function EmprestimosPage() {
   const [importado, setImportado] = useState<Parcela[] | null>(null);
   const [avisos, setAvisos] = useState<string[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<LoanRow | null>(null);
+  // Detalhe das parcelas: a data de baixa fica por parcela, porque cada uma
+  // pode ter sido paga num dia diferente do vencimento.
+  const [detalheDe, setDetalheDe] = useState<LoanRow | null>(null);
+  const [datasBaixa, setDatasBaixa] = useState<Record<string, string>>({});
 
   const { data, isLoading } = useQuery({
     queryKey: ["emprestimos"],
@@ -138,7 +156,7 @@ function EmprestimosPage() {
         supabase.from("loans").select("*").order("received_on", { ascending: false }),
         supabase
           .from("financial_transactions")
-          .select("loan_id, type, status, amount, due_date")
+          .select("id, loan_id, type, status, amount, due_date, paid_on, recurrence_index, recurrence_total, description")
           .not("loan_id", "is", null),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
         supabase
@@ -151,13 +169,7 @@ function EmprestimosPage() {
       if (loans.error) throw loans.error;
       return {
         loans: (loans.data ?? []) as unknown as LoanRow[],
-        txs: (txs.data ?? []) as unknown as {
-          loan_id: string;
-          type: string;
-          status: string;
-          amount: number;
-          due_date: string | null;
-        }[],
+        txs: (txs.data ?? []) as unknown as ParcelaTx[],
         banks: banks.data ?? [],
         categories: cats.data ?? [],
       };
@@ -251,6 +263,37 @@ function EmprestimosPage() {
     onError: (e: Error) => toast.error("Erro ao cadastrar", { description: friendlyError(e) }),
   });
 
+  const marcarPaga = useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: string }) => {
+      if (!data) throw new Error("Informe a data em que a parcela foi paga");
+      const { error } = await supabase
+        .from("financial_transactions")
+        .update({ status: "pago" as never, paid_on: data })
+        .eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Parcela paga — já entrou no caixa e no saldo da conta.");
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao dar baixa", { description: friendlyError(e) }),
+  });
+
+  const desfazerBaixa = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase
+        .from("financial_transactions")
+        .update({ status: "previsto" as never, paid_on: null })
+        .eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Baixa desfeita — a parcela voltou para a lista a pagar.");
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao desfazer", { description: friendlyError(e) }),
+  });
+
   const remove = useMutation({
     mutationFn: async () => {
       if (!deleteTarget) throw new Error("Empréstimo inválido");
@@ -278,6 +321,18 @@ function EmprestimosPage() {
       .sort()[0];
     return { total: pago + aPagar, pago, aPagar, parcelas: linhas.length, proxima };
   };
+
+  /** Parcelas do empréstimo aberto no detalhe, na ordem do vencimento. */
+  const parcelasDoDetalhe = useMemo(() => {
+    if (!detalheDe) return [] as ParcelaTx[];
+    return (data?.txs ?? [])
+      .filter((t) => t.loan_id === detalheDe.id && t.type === "saida")
+      .sort(
+        (a, b) =>
+          (a.recurrence_index ?? 0) - (b.recurrence_index ?? 0) ||
+          String(a.due_date ?? "").localeCompare(String(b.due_date ?? "")),
+      );
+  }, [data, detalheDe]);
 
   const totalEmAberto = (data?.loans ?? []).reduce((s, l) => s + resumoDe(l.id).aPagar, 0);
 
@@ -317,7 +372,7 @@ function EmprestimosPage() {
               <th className="text-right">Total a devolver</th>
               <th className="text-right">Falta pagar</th>
               <th>Próxima</th>
-              {canWrite && <th className="p-3" />}
+              <th className="p-3" />
             </tr>
           </thead>
           <tbody>
@@ -351,8 +406,11 @@ function EmprestimosPage() {
                   </td>
                   <td className="num text-right font-medium">{money(r.aPagar)}</td>
                   <td className="whitespace-nowrap">{dateBR(r.proxima)}</td>
-                  {canWrite && (
-                    <td className="p-3 text-right">
+                  <td className="p-3 text-right whitespace-nowrap">
+                    <Button size="sm" variant="outline" onClick={() => setDetalheDe(l)}>
+                      Parcelas
+                    </Button>
+                    {canWrite && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -361,8 +419,8 @@ function EmprestimosPage() {
                       >
                         Apagar
                       </Button>
-                    </td>
-                  )}
+                    )}
+                  </td>
                 </tr>
               );
             })}
@@ -637,6 +695,149 @@ function EmprestimosPage() {
               disabled={create.isPending || !parcelas.length}
             >
               {create.isPending ? "Criando…" : `Criar com ${parcelas.length} parcela(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Detalhe das parcelas: dar baixa aqui é a mesma coisa que dar baixa no
+          Fluxo de Caixa — a parcela vira despesa paga na data informada. */}
+      <Dialog
+        open={!!detalheDe}
+        onOpenChange={(v) => {
+          if (!v) {
+            setDetalheDe(null);
+            setDatasBaixa({});
+          }
+        }}
+      >
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Parcelas — {detalheDe?.lender}</DialogTitle>
+            <DialogDescription>
+              {detalheDe?.contract_number ? `Contrato ${detalheDe.contract_number}. ` : ""}
+              Ao dar baixa, a parcela vira despesa paga na data informada e sai do saldo da conta.
+            </DialogDescription>
+          </DialogHeader>
+
+          {detalheDe &&
+            (() => {
+              const r = resumoDe(detalheDe.id);
+              return (
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <div className="panel p-3">
+                    <p className="text-xs text-muted-foreground uppercase">Parcelas</p>
+                    <p className="num mt-1 text-lg font-semibold">{r.parcelas}</p>
+                  </div>
+                  <div className="panel p-3">
+                    <p className="text-xs text-muted-foreground uppercase">Já pago</p>
+                    <p className="num mt-1 text-lg font-semibold text-success">{money(r.pago)}</p>
+                  </div>
+                  <div className="panel p-3">
+                    <p className="text-xs text-muted-foreground uppercase">Falta pagar</p>
+                    <p className="num mt-1 text-lg font-semibold text-warning">{money(r.aPagar)}</p>
+                  </div>
+                  <div className="panel p-3">
+                    <p className="text-xs text-muted-foreground uppercase">Próximo vencimento</p>
+                    <p className="mt-1 text-lg font-semibold">{dateBR(r.proxima)}</p>
+                  </div>
+                </div>
+              );
+            })()}
+
+          <div className="max-h-96 overflow-auto rounded-md border border-border">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-card">
+                <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
+                  <th className="p-2">Parcela</th>
+                  <th>Vencimento</th>
+                  <th className="text-right">Valor</th>
+                  <th>Situação</th>
+                  <th className="p-2">Baixa</th>
+                </tr>
+              </thead>
+              <tbody>
+                {parcelasDoDetalhe.map((t) => {
+                  const pago = t.status === "pago";
+                  return (
+                    <tr key={t.id} className="border-b border-border/60 last:border-0">
+                      <td className="p-2 whitespace-nowrap">
+                        {t.recurrence_index ?? "—"}
+                        {t.recurrence_total ? `/${t.recurrence_total}` : ""}
+                      </td>
+                      <td className="whitespace-nowrap">{dateBR(t.due_date)}</td>
+                      <td className="num text-right">{money(t.amount)}</td>
+                      <td>
+                        {pago ? (
+                          <span className="text-xs text-success">
+                            Paga em {dateBR(t.paid_on)}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-warning">A pagar</span>
+                        )}
+                      </td>
+                      <td className="p-2 whitespace-nowrap">
+                        {pago ? (
+                          canWrite && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={desfazerBaixa.isPending}
+                              onClick={() => desfazerBaixa.mutate(t.id)}
+                            >
+                              Desfazer
+                            </Button>
+                          )
+                        ) : (
+                          canWrite && (
+                            <div className="flex items-center gap-1">
+                              <Input
+                                type="date"
+                                className="w-36"
+                                aria-label={`Data do pagamento da parcela ${t.recurrence_index ?? ""}`}
+                                value={datasBaixa[t.id] ?? t.due_date ?? todayISO()}
+                                onChange={(e) =>
+                                  setDatasBaixa((d) => ({ ...d, [t.id]: e.target.value }))
+                                }
+                              />
+                              <Button
+                                size="sm"
+                                disabled={marcarPaga.isPending}
+                                onClick={() =>
+                                  marcarPaga.mutate({
+                                    id: t.id,
+                                    data: datasBaixa[t.id] ?? t.due_date ?? todayISO(),
+                                  })
+                                }
+                              >
+                                OK
+                              </Button>
+                            </div>
+                          )
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {parcelasDoDetalhe.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="p-6 text-center text-muted-foreground">
+                      Este empréstimo não tem parcelas cadastradas.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            A data vem preenchida com o vencimento. Se pagou em outro dia, troque antes de clicar
+            em OK — é essa data que entra no caixa.
+          </p>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDetalheDe(null)}>
+              Fechar
             </Button>
           </DialogFooter>
         </DialogContent>
