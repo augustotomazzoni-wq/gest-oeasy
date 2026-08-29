@@ -659,6 +659,8 @@ export type Database = {
       }
       financial_transactions: {
         Row: {
+          is_financing: boolean
+          loan_id: string | null
           import_hash: string | null
           payment_method: string | null
           recurrence_group_id: string | null
@@ -686,6 +688,8 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          is_financing?: boolean
+          loan_id?: string | null
           import_hash?: string | null
           payment_method?: string | null
           recurrence_group_id?: string | null
@@ -713,6 +717,8 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          is_financing?: boolean
+          loan_id?: string | null
           import_hash?: string | null
           payment_method?: string | null
           recurrence_group_id?: string | null
@@ -978,6 +984,56 @@ export type Database = {
           },
           {
             foreignKeyName: "legal_receivables_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      loans: {
+        Row: {
+          amount_received: number
+          bank_account_id: string | null
+          contract_number: string | null
+          created_at: string
+          created_by: string | null
+          id: string
+          lender: string
+          notes: string | null
+          organization_id: string
+          received_on: string | null
+          updated_at: string
+        }
+        Insert: {
+          amount_received?: number
+          bank_account_id?: string | null
+          contract_number?: string | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lender: string
+          notes?: string | null
+          organization_id: string
+          received_on?: string | null
+          updated_at?: string
+        }
+        Update: {
+          amount_received?: number
+          bank_account_id?: string | null
+          contract_number?: string | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lender?: string
+          notes?: string | null
+          organization_id?: string
+          received_on?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "loans_organization_id_fkey"
             columns: ["organization_id"]
             isOneToOne: false
             referencedRelation: "organizations"
@@ -1482,6 +1538,23 @@ export type Database = {
       delete_canceled_receivable: {
         Args: { _receivable_id: string }
         Returns: undefined
+      }
+      create_loan: {
+        Args: {
+          _amount_received: number
+          _bank_account_id?: string
+          _category_id?: string
+          _contract_number?: string
+          _installments: Json
+          _lender: string
+          _notes?: string
+          _received_on: string
+        }
+        Returns: string
+      }
+      delete_loan: {
+        Args: { _loan_id: string }
+        Returns: number
       }
       create_transfer_from_receipt: {
         Args: { _receipt_id: string; _scheduled_for?: string }

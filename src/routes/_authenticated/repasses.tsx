@@ -271,6 +271,11 @@ function RepassesPage() {
   }
 
   const pendingTotal = (data?.balances ?? []).reduce((s, b) => s + num(b.pending_transfer), 0);
+  // Só quem o escritório ainda deve. Cliente já quitada polui a lista e
+  // esconde justamente quem precisa ser pago, então sai daqui.
+  const devedores = (data?.balances ?? [])
+    .filter((b) => num(b.pending_transfer) > 0.01)
+    .sort((a, b) => num(b.pending_transfer) - num(a.pending_transfer));
 
   return (
     <>
@@ -541,24 +546,37 @@ function RepassesPage() {
 
         <div className="panel overflow-x-auto">
           <div className="border-b border-border p-3">
-            <h2 className="font-display text-sm font-semibold">Saldo por cliente</h2>
+            <h2 className="font-display text-sm font-semibold">Clientes a quem ainda devemos</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Quem já quitou sai da lista. {devedores.length} cliente(s) — {money(pendingTotal)} a
+              repassar.
+            </p>
           </div>
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
                 <th className="p-3">Cliente</th>
-                <th className="text-right">Recebido</th>
-                <th className="p-3 text-right">A repassar</th>
+                <th className="text-right">Total que vai receber</th>
+                <th className="text-right">Já repassado</th>
+                <th className="p-3 text-right">Falta receber</th>
               </tr>
             </thead>
             <tbody>
-              {(data?.balances ?? []).map((b) => (
+              {devedores.map((b) => (
                 <tr key={b.client_id} className="border-b border-border/60 last:border-0">
                   <td className="p-3">{b.name}</td>
                   <td className="num text-right">{money(b.received_client)}</td>
+                  <td className="num text-right text-muted-foreground">{money(b.transferred)}</td>
                   <td className="num p-3 text-right font-medium">{money(b.pending_transfer)}</td>
                 </tr>
               ))}
+              {devedores.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="p-6 text-center text-muted-foreground">
+                    Nenhum repasse pendente — todas as clientes estão em dia.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

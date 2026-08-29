@@ -130,7 +130,7 @@ function usePeriodData(start: string, end: string) {
           .lte("received_on", end),
         supabase
           .from("financial_transactions")
-          .select("type, amount, paid_on")
+          .select("type, amount, paid_on, is_financing")
           .eq("status", "pago")
           .gte("paid_on", start)
           .lte("paid_on", end),
@@ -232,8 +232,17 @@ function Dashboard() {
     (s, r) => s + num(r.client_amount_received_by_firm),
     0,
   );
+  // Parcela de empréstimo não é custo de operação: é devolução de dinheiro
+  // que já entrou. Deixá-la aqui derrubaria o lucro e o custo por cliente de
+  // todo mês por algo que não tem a ver com atender cliente.
   const periodExpenses = (periodData?.txs ?? [])
-    .filter((t) => t.type === "saida")
+    .filter((t) => t.type === "saida" && !t.is_financing)
+    .reduce((s, t) => s + num(t.amount), 0);
+  const periodFinancingOut = (periodData?.txs ?? [])
+    .filter((t) => t.type === "saida" && t.is_financing)
+    .reduce((s, t) => s + num(t.amount), 0);
+  const periodFinancingIn = (periodData?.txs ?? [])
+    .filter((t) => t.type === "entrada" && t.is_financing)
     .reduce((s, t) => s + num(t.amount), 0);
   // Tudo que entrou de fato na conta como dinheiro do escritório: honorários e
   // sucumbência somados a empréstimos, aportes de sócio e qualquer outra
@@ -490,6 +499,16 @@ function Dashboard() {
             </p>
           </div>
         </div>
+
+        {(periodFinancingIn > 0.01 || periodFinancingOut > 0.01) && (
+          <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+            Empréstimos no período: entrou{" "}
+            <strong className="num text-foreground">{money(periodFinancingIn)}</strong> e saiu{" "}
+            <strong className="num text-foreground">{money(periodFinancingOut)}</strong>. Isso mexe
+            no saldo das contas, mas fica de fora do lucro e do custo por cliente — empréstimo não
+            é receita nem custo de operação, é dinheiro emprestado indo e voltando.
+          </div>
+        )}
 
         <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
           Neste período,{" "}

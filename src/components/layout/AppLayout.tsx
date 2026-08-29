@@ -8,6 +8,7 @@ import {
   CalendarClock,
   Send,
   Wallet,
+  Landmark,
   Settings,
   ShieldCheck,
   LogOut,
@@ -31,6 +32,7 @@ const NAV = [
   { to: "/parcelas", label: "Parcelas e Recebimentos", icon: CalendarClock, module: "parcelas" },
   { to: "/repasses", label: "Repasses a Clientes", icon: Send, module: "repasses" },
   { to: "/caixa", label: "Fluxo de Caixa", icon: Wallet, module: "caixa" },
+  { to: "/emprestimos", label: "Empréstimos", icon: Landmark, module: "caixa" },
   { to: "/importar", label: "Importar Planilha", icon: Upload, module: "importacao" },
   { to: "/configuracoes", label: "Configurações", icon: Settings, module: "contas" },
 ] as const;

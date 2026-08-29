@@ -116,6 +116,7 @@ type TxRow = {
   recurrence_index: number | null;
   recurrence_total: number | null;
   source_type: string | null;
+  is_financing: boolean | null;
   bank_accounts: { name: string } | null;
   categories: { name: string } | null;
 };
@@ -206,7 +207,7 @@ function CaixaPage() {
   }, [data, view]);
 
   const totals = useMemo(() => {
-    const t = { in: 0, out: 0, thirdIn: 0, thirdOut: 0, aPagar: 0, aReceber: 0 };
+    const t = { in: 0, out: 0, thirdIn: 0, thirdOut: 0, aPagar: 0, aReceber: 0, finIn: 0, finOut: 0 };
     for (const r of data?.transactions ?? []) {
       const v = num(r.amount);
       if (r.status !== "pago") {
@@ -214,7 +215,12 @@ function CaixaPage() {
         else if (r.type === "entrada") t.aReceber += v;
         continue;
       }
-      if (r.type === "entrada") t.in += v;
+      // Empréstimo entra e sai do caixa, mas não é receita nem despesa da
+      // operação: fica numa linha só dele para não sujar o resultado do mês.
+      if (r.is_financing) {
+        if (r.type === "entrada") t.finIn += v;
+        else if (r.type === "saida") t.finOut += v;
+      } else if (r.type === "entrada") t.in += v;
       else if (r.type === "saida") t.out += v;
       else if (r.type === "entrada_de_terceiros") t.thirdIn += v;
       else if (r.type === "repasse_de_terceiros") t.thirdOut += v;
@@ -466,7 +472,7 @@ function CaixaPage() {
         </div>
       </div>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">Receitas do escritório</p>
           <p className="num mt-1 text-xl font-semibold text-success">{money(totals.in)}</p>
@@ -487,6 +493,13 @@ function CaixaPage() {
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">A receber</p>
           <p className="num mt-1 text-xl font-semibold">{money(totals.aReceber)}</p>
+        </div>
+        <div className="panel p-4">
+          <p className="text-xs text-muted-foreground uppercase">Empréstimos (entrou / saiu)</p>
+          <p className="num mt-1 text-xl font-semibold">
+            {money(totals.finIn)} / {money(totals.finOut)}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">Fora do resultado</p>
         </div>
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">Terceiros (entrada / repasse)</p>
