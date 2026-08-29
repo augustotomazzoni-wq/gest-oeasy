@@ -67,6 +67,8 @@ type DistributionMode = "proporcional" | "escritorio_primeiro" | "manual";
 type ScheduleRow = {
   label: string;
   number: number;
+  /** De onde vem a parcela: o acordo em si ou a sucumbência paga direto. */
+  stream: "principal" | "sucumbencia";
   due_date: string;
   gross_amount: number;
   firm_amount: number;
@@ -172,6 +174,12 @@ const EMPTY = {
   parcels: "1",
   first_due: todayISO(),
   periodicity: "1",
+  // Sucumbência com cronograma próprio: a parte contrária paga direto ao
+  // escritório, e quase nunca nas mesmas datas do acordo da cliente.
+  success_separate: false,
+  success_parcels: "1",
+  success_first_due: todayISO(),
+  success_periodicity: "1",
   has_entry: false,
   entry_amount: "",
   entry_due: todayISO(),
@@ -209,6 +217,10 @@ function AcordosPage() {
     "periodicity",
     "distribution_mode",
     "no_schedule",
+    "success_separate",
+    "success_parcels",
+    "success_first_due",
+    "success_periodicity",
   ] as const;
 
   function updateForm(patch: Partial<typeof EMPTY>) {
@@ -288,9 +300,16 @@ function AcordosPage() {
   const overridden =
     Math.abs(firm - suggestedFirm) > 0.01 || Math.abs(client - suggestedClient) > 0.01;
 
+  // Sucumbência com datas próprias só faz sentido quando existe sucumbência e
+  // ela não está embutida no valor do acordo.
+  const successSeparated = form.success_separate && successFee > 0.01 && !isServiceFee;
+  // Com as trilhas separadas, o cronograma do acordo carrega só honorários
+  // contratuais + parte da cliente; a sucumbência vira um bloco à parte.
+  const mainFirm = successSeparated ? Math.max(firm - successFee, 0) : firm;
+
   const generatedSchedule = useMemo<ScheduleRow[]>(() => {
     if (form.no_schedule) return [];
-    const scheduleTotalCents = cents(firm + client + costs);
+    const scheduleTotalCents = cents(mainFirm + client + costs);
     if (scheduleTotalCents <= 0) return [];
 
     const entryRequested = form.has_entry ? cents(Number(form.entry_amount)) : 0;
@@ -322,17 +341,44 @@ function AcordosPage() {
 
     const allocations = allocateByCapacity(
       capacities,
-      { firm, client, costs },
+      { firm: mainFirm, client, costs },
       form.distribution_mode,
     );
 
-    return allocations.map((allocation, index) => ({
+    const principal: ScheduleRow[] = allocations.map((allocation, index) => ({
       ...allocation,
       label: labels[index] ?? `Parcela ${index + 1}`,
       number: index + 1,
+      stream: "principal" as const,
       due_date: dueDates[index] ?? form.first_due,
     }));
-  }, [form, firm, client, costs]);
+
+    if (!successSeparated) return principal;
+
+    // Bloco da sucumbência: valor inteiro do escritório, nas datas dela.
+    const successCents = cents(successFee);
+    const successCount = Math.max(1, Math.floor(num(Number(form.success_parcels))));
+    const successPeriod = Math.max(1, Math.floor(num(Number(form.success_periodicity))));
+    const base = Math.floor(successCents / successCount);
+    let allocated = 0;
+    const sucumbencia: ScheduleRow[] = [];
+    for (let index = 0; index < successCount; index += 1) {
+      const value = index === successCount - 1 ? successCents - allocated : base;
+      allocated += value;
+      sucumbencia.push({
+        label: successCount > 1 ? `Sucumbência ${index + 1}` : "Sucumbência",
+        number: principal.length + index + 1,
+        stream: "sucumbencia",
+        due_date: addMonthsISO(form.success_first_due, index * successPeriod),
+        gross_amount: fromCents(value),
+        firm_amount: fromCents(value),
+        client_amount: 0,
+        cost_reimbursement: 0,
+      });
+    }
+
+    return [...principal, ...sucumbencia];
+  }, [form, mainFirm, client, costs, successSeparated, successFee]);
 
   const schedule = editedSchedule ?? generatedSchedule;
 
@@ -415,9 +461,18 @@ function AcordosPage() {
 
       const successForSchedule = Math.min(successFee, firm);
       const feeForSchedule = Math.max(firm - successForSchedule, 0);
-      const firmComponents = schedule.length
-        ? splitFirmComponents(schedule, feeForSchedule, successForSchedule)
-        : [];
+      // Com as trilhas separadas cada parcela já nasce pura: a do acordo é
+      // toda honorário contratual, a da sucumbência é toda sucumbência.
+      // Sem separação, mantém o rateio proporcional de antes.
+      const firmComponents = !schedule.length
+        ? []
+        : successSeparated
+          ? schedule.map((row) =>
+              row.stream === "sucumbencia"
+                ? { fee_amount: 0, success_fee_amount: row.firm_amount }
+                : { fee_amount: row.firm_amount, success_fee_amount: 0 },
+            )
+          : splitFirmComponents(schedule, feeForSchedule, successForSchedule);
 
       // Acordo e cronograma são gravados em uma única transação no banco:
       // se a criação das parcelas falhar, o acordo também não é criado —
@@ -447,6 +502,7 @@ function AcordosPage() {
           number: s.number,
           total_count: schedule.length,
           due_date: s.due_date,
+          stream: s.stream ?? "principal",
           gross_amount: s.gross_amount,
           fee_amount: firmComponents[index]?.fee_amount ?? 0,
           success_fee_amount: firmComponents[index]?.success_fee_amount ?? 0,
@@ -911,6 +967,71 @@ function AcordosPage() {
                             />
                           </div>
                         </div>
+
+                        {/* Caso comum: a cliente recebe o acordo e repassa a
+                            parte do escritório, enquanto a sucumbência é paga
+                            direto pela parte contrária — em datas próprias. */}
+                        {successFee > 0 && !isServiceFee && (
+                          <div className="rounded-md border border-border p-3">
+                            <label className="flex items-start gap-2 text-sm">
+                              <Checkbox
+                                checked={form.success_separate}
+                                onCheckedChange={(v) =>
+                                  updateForm({ success_separate: v === true })
+                                }
+                              />
+                              <span>
+                                A sucumbência é paga direto pela parte contrária, em datas
+                                próprias
+                                <span className="mt-0.5 block text-xs text-muted-foreground">
+                                  Gera parcelas separadas para os {money(successFee)} de
+                                  sucumbência. O cronograma do acordo fica só com o que passa
+                                  pela cliente.
+                                </span>
+                              </span>
+                            </label>
+
+                            {form.success_separate && (
+                              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                                <div className="space-y-2">
+                                  <Label htmlFor="spar">Parcelas da sucumbência</Label>
+                                  <Input
+                                    id="spar"
+                                    type="number"
+                                    min="1"
+                                    value={form.success_parcels}
+                                    onChange={(e) =>
+                                      updateForm({ success_parcels: e.target.value })
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <Label htmlFor="sfst">1º vencimento</Label>
+                                  <Input
+                                    id="sfst"
+                                    type="date"
+                                    value={form.success_first_due}
+                                    onChange={(e) =>
+                                      updateForm({ success_first_due: e.target.value })
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <Label htmlFor="sper">Periodicidade (meses)</Label>
+                                  <Input
+                                    id="sper"
+                                    type="number"
+                                    min="1"
+                                    value={form.success_periodicity}
+                                    onChange={(e) =>
+                                      updateForm({ success_periodicity: e.target.value })
+                                    }
+                                  />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -1033,6 +1154,9 @@ function AcordosPage() {
                                       updateScheduleRow(index, { label: e.target.value })
                                     }
                                   />
+                                  {row.stream === "sucumbencia" && (
+                                    <Tag tone="info">paga direto ao escritório</Tag>
+                                  )}
                                 </td>
                                 <td className="p-2">
                                   <Input

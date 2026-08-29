@@ -56,6 +56,7 @@ export const Route = createFileRoute("/_authenticated/parcelas")({
 
 type Row = {
   id: string;
+  stream: string | null;
   receivable_id: string;
   client_id: string | null;
   label: string | null;
@@ -565,6 +566,9 @@ function ParcelasPage() {
               <tr key={r.id} className="border-b border-border/60 last:border-0">
                 <td className="p-3 font-medium">
                   {(r.client_id && data?.clientMap.get(r.client_id)) || "—"}
+                  {r.stream === "sucumbencia" && (
+                    <span className="block text-xs text-info">sucumbência — paga direto</span>
+                  )}
                 </td>
                 <td>
                   <span className="font-medium">{r.label || `Parcela ${r.number ?? "—"}`}</span>
