@@ -347,6 +347,13 @@ function AcordosPage() {
   const overridden =
     Math.abs(firm - suggestedFirm) > 0.01 || Math.abs(client - suggestedClient) > 0.01;
 
+  // Quando a cliente recebe o dinheiro direto da empresa, o que ela guarda para
+  // si nunca passa pelo escritório: as "parcelas a receber" são só o que ela
+  // vai repassar para nós. Antes o cronograma cobrava o valor cheio do acordo,
+  // e a lista de parcelas ficava com um valor que ninguém nunca ia receber.
+  const clienteRecebeDireto = form.flow === "cliente_recebe_direto";
+  const clientNoCronograma = clienteRecebeDireto ? 0 : client;
+
   // Sucumbência com datas próprias só faz sentido quando existe sucumbência e
   // ela não está embutida no valor do acordo.
   const successSeparated = form.success_separate && successFee > 0.01 && !isServiceFee;
@@ -356,7 +363,7 @@ function AcordosPage() {
 
   const generatedSchedule = useMemo<ScheduleRow[]>(() => {
     if (form.no_schedule) return [];
-    const scheduleTotalCents = cents(mainFirm + client + costs);
+    const scheduleTotalCents = cents(mainFirm + clientNoCronograma + costs);
     if (scheduleTotalCents <= 0) return [];
 
     const entryRequested = form.has_entry ? cents(Number(form.entry_amount)) : 0;
@@ -388,7 +395,7 @@ function AcordosPage() {
 
     const allocations = allocateByCapacity(
       capacities,
-      { firm: mainFirm, client, costs },
+      { firm: mainFirm, client: clientNoCronograma, costs },
       form.distribution_mode,
     );
 
@@ -425,7 +432,7 @@ function AcordosPage() {
     }
 
     return [...principal, ...sucumbencia];
-  }, [form, mainFirm, client, costs, successSeparated, successFee]);
+  }, [form, mainFirm, clientNoCronograma, costs, successSeparated, successFee]);
 
   const schedule = editedSchedule ?? generatedSchedule;
 
@@ -446,7 +453,7 @@ function AcordosPage() {
   const scheduleErrors = useMemo(() => {
     if (form.no_schedule) return [];
     const errors: string[] = [];
-    const expectedTotal = firm + client + costs;
+    const expectedTotal = firm + clientNoCronograma + costs;
     const entry = num(Number(form.entry_amount));
     if (form.has_entry && entry <= 0) errors.push("Informe um valor de entrada maior que zero.");
     if (form.has_entry && entry - expectedTotal > 0.01)
@@ -466,11 +473,13 @@ function AcordosPage() {
       errors.push("A soma das parcelas não fecha com o total a receber.");
     if (Math.abs(scheduleTotals.firm - firm) > 0.01)
       errors.push("A soma destinada ao escritório não fecha com o valor esperado.");
-    if (Math.abs(scheduleTotals.client - client) > 0.01)
+    if (Math.abs(scheduleTotals.client - clientNoCronograma) > 0.01)
       errors.push("A soma destinada ao cliente não fecha com o valor esperado.");
     if (Math.abs(scheduleTotals.costs - costs) > 0.01)
       errors.push("A soma dos reembolsos não fecha com o valor esperado.");
-    if (gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > 0.01)
+    // Com a cliente recebendo direto, o cronograma vale menos que o acordo de
+    // propósito — a conferência com o valor bruto não se aplica.
+    if (!clienteRecebeDireto && gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > 0.01)
       errors.push(
         `O total distribuído (${money(expectedTotal)}) não fecha com o valor bruto` +
           `${successInsideGross ? "" : " + sucumbência"} (${money(expectedGrossTotal)}).`,
@@ -478,6 +487,8 @@ function AcordosPage() {
     return [...new Set(errors)];
   }, [
     client,
+    clientNoCronograma,
+    clienteRecebeDireto,
     costs,
     firm,
     gross,
@@ -916,6 +927,12 @@ function AcordosPage() {
                     </div>
                     <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label>Forma do fluxo</Label>
+                      {clienteRecebeDireto && (
+                        <p className="order-last text-xs text-info">
+                          As parcelas a receber vão conter só o que a cliente repassa para o
+                          escritório — o dinheiro dela não passa por aqui.
+                        </p>
+                      )}
                       <Select
                         value={form.flow}
                         onValueChange={(v) => setForm({ ...form, flow: v })}
@@ -1089,6 +1106,31 @@ function AcordosPage() {
                             />
                           </div>
                         </div>
+
+                        {clienteRecebeDireto && (
+                          <div className="rounded-md border border-info/40 bg-info/5 p-3 text-xs">
+                            <p className="font-medium text-foreground">
+                              A cliente recebe direto da empresa
+                            </p>
+                            <p className="mt-1 text-muted-foreground">
+                              O cronograma abaixo cobra só os{" "}
+                              <strong className="num text-foreground">{money(mainFirm + costs)}</strong>{" "}
+                              que ela deve repassar ao escritório. Os{" "}
+                              <strong className="num text-foreground">{money(client)}</strong> que
+                              ficam com ela não viram parcela a receber, porque nunca passam pela
+                              nossa conta.
+                              {successFee > 0 && !successInsideGross && (
+                                <>
+                                  {" "}
+                                  A sucumbência de{" "}
+                                  <strong className="num text-foreground">{money(successFee)}</strong>{" "}
+                                  é paga pela empresa — marque a opção abaixo para ela virar
+                                  parcelas próprias.
+                                </>
+                              )}
+                            </p>
+                          </div>
+                        )}
 
                         {/* Caso comum: a cliente recebe o acordo e repassa a
                             parte do escritório, enquanto a sucumbência é paga
