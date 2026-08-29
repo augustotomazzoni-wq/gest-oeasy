@@ -953,7 +953,11 @@ function AcordosPage() {
   });
 
   /** Parcelas do acordo que está aberto para edição. */
-  const { data: parcelasDoAcordo, isLoading: parcelasLoading } = useQuery({
+  const {
+    data: parcelasDoAcordo,
+    isLoading: parcelasLoading,
+    error: parcelasError,
+  } = useQuery({
     queryKey: ["acordo-parcelas", editTarget?.id],
     enabled: !!editTarget,
     queryFn: async () => {
@@ -2544,7 +2548,16 @@ function AcordosPage() {
                 <p className="text-xs text-muted-foreground">Carregando parcelas…</p>
               )}
 
-              {!parcelasLoading && editSchedule.length === 0 && (
+              {/* Sem isto, uma falha ao carregar se disfarçava de acordo sem
+                  parcelas — foi o que aconteceu quando a view do banco estava
+                  sem a coluna de origem da parcela. */}
+              {parcelasError && (
+                <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+                  Não foi possível carregar as parcelas: {friendlyError(parcelasError)}
+                </p>
+              )}
+
+              {!parcelasLoading && !parcelasError && editSchedule.length === 0 && (
                 <p className="text-xs text-muted-foreground">
                   Este acordo ainda não tem parcelas.
                 </p>
