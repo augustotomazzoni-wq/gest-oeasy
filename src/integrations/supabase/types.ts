@@ -1592,6 +1592,16 @@ export type Database = {
         Args: { _group_id: string }
         Returns: number
       }
+      move_installment_balance: {
+        Args: {
+          _destino: string
+          _due_date?: string
+          _installment_id: string
+          _label?: string
+          _target_installment_id?: string
+        }
+        Returns: string
+      }
       restore_backup: {
         Args: { _payload: Json }
         Returns: Json

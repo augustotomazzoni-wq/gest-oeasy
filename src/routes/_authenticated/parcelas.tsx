@@ -95,6 +95,8 @@ type ReceiptRow = {
   reversal_reason: string | null;
 };
 
+const round2 = (value: number) => Math.round(num(value) * 100) / 100;
+
 const FILTERS = [
   { key: "TODAS", label: "Todas" },
   { key: "ATRASADA", label: "Atrasadas" },
@@ -138,6 +140,10 @@ function ParcelasPage() {
     reference: "",
     notes: "",
     allocation_override_reason: "",
+    // Quando entra menos que o valor da parcela, o que fazer com o que faltou.
+    shortfall_action: "manter",
+    shortfall_installment_id: "",
+    shortfall_due_date: todayISO(),
   });
 
   // Painel de histórico/estorno de uma parcela.
@@ -313,6 +319,9 @@ function ParcelasPage() {
         reference: "",
         notes: "",
         allocation_override_reason: "",
+        shortfall_action: "manter",
+        shortfall_installment_id: "",
+        shortfall_due_date: todayISO(),
       });
       return;
     }
@@ -331,6 +340,55 @@ function ParcelasPage() {
       reference: "",
       notes: "",
       allocation_override_reason: "",
+      shortfall_action: "manter",
+      shortfall_installment_id: "",
+      shortfall_due_date: todayISO(),
+    });
+  }
+
+  /**
+   * Mudou o valor recebido: o rateio acompanha, proporcional ao que ainda está
+   * em aberto na parcela.
+   *
+   * Sem isso, digitar um pagamento parcial deixava as partes somando o valor
+   * cheio e a baixa era recusada — a pessoa tinha que refazer a divisão na mão
+   * a cada parcela paga a menos. Continua dando para digitar por cima de cada
+   * campo quando a divisão real foi outra.
+   */
+  function changeTotal(value: string) {
+    const total = num(Number(value));
+    const restante = (previsto: number | null, pago: number | null) =>
+      Math.max(num(previsto) - num(pago), 0);
+    if (!target || total <= 0) {
+      setPay({ ...pay, total_amount: value });
+      return;
+    }
+    const remainingFee = restante(target.fee_amount, target.paid_fee);
+    const remainingSuccess = restante(target.success_fee_amount, target.paid_success_fee);
+    const remainingClient = restante(target.client_amount, target.paid_client);
+    const remainingCosts = restante(target.cost_reimbursement, target.paid_cost_reimbursement);
+    const remaining = remainingFee + remainingSuccess + remainingClient + remainingCosts;
+    if (remaining <= 0) {
+      setPay({ ...pay, total_amount: value });
+      return;
+    }
+    const ratio = Math.min(total / remaining, 1);
+    const fee = isCobrancaOnly ? 0 : round2(remainingFee * ratio);
+    const success = isCobrancaOnly ? 0 : round2(remainingSuccess * ratio);
+    const costs = isCobrancaOnly ? 0 : round2(remainingCosts * ratio);
+    // A parte da cliente fecha a conta, para o rateio bater com o total no
+    // centavo em vez de sobrar arredondamento.
+    const client = Math.max(round2(total - fee - success - costs), 0);
+    const naConta = pay.receipt_destination === "conta_escritorio";
+    setPay({
+      ...pay,
+      total_amount: value,
+      fee_amount: fee.toFixed(2),
+      success_fee_amount: success.toFixed(2),
+      client_amount: client.toFixed(2),
+      cost_reimbursement: costs.toFixed(2),
+      client_amount_received_by_firm: naConta ? client.toFixed(2) : "0.00",
+      client_amount_received_direct: naConta ? "0.00" : client.toFixed(2),
     });
   }
 
@@ -346,6 +404,25 @@ function ParcelasPage() {
       bank_account_id: destination === "cliente_direto" ? "" : pay.bank_account_id,
     });
   }
+
+  // Quanto está faltando nesta baixa. É o que dispara a pergunta de para onde
+  // vai o saldo: sem isso, a parcela ficaria parcial numa data já vencida e
+  // ninguém lembraria de cobrar.
+  const shortfall = target ? round2(num(target.balance) - num(Number(pay.total_amount))) : 0;
+
+  /** Parcelas do mesmo acordo que ainda podem receber o saldo. */
+  const irmasEmAberto = useMemo(() => {
+    if (!target) return [];
+    return (data?.rows ?? [])
+      .filter(
+        (r) =>
+          r.receivable_id === target.receivable_id &&
+          r.id !== target.id &&
+          !r.canceled_at &&
+          num(r.balance) > 0.01,
+      )
+      .sort((a, b) => String(a.due_date ?? "").localeCompare(String(b.due_date ?? "")));
+  }, [data, target]);
 
   const register = useMutation({
     mutationFn: async () => {
@@ -399,6 +476,11 @@ function ParcelasPage() {
       if (changedAllocation && !pay.allocation_override_reason.trim())
         throw new Error("Justifique a divisão diferente da composição prevista da parcela");
 
+      if (shortfall > 0.01 && pay.shortfall_action === "parcela" && !pay.shortfall_installment_id)
+        throw new Error("Escolha a parcela que vai receber o valor que faltou");
+      if (shortfall > 0.01 && pay.shortfall_action === "nova" && !pay.shortfall_due_date)
+        throw new Error("Informe o vencimento da parcela nova");
+
       const { data: createdReceipt, error } = await supabase
         .from("receipts")
         .insert({
@@ -446,11 +528,39 @@ function ParcelasPage() {
         },
       });
 
+      // O saldo vai para onde a pessoa escolheu: somado em outra parcela ou
+      // cobrado numa parcela nova. Esta parcela encolhe para o que entrou de
+      // verdade e fica quitada.
+      let saldoMovido = 0;
+      if (shortfall > 0.01 && pay.shortfall_action !== "manter") {
+        const { error: saldoError } = await supabase.rpc(
+          "move_installment_balance",
+          dropUndefined({
+            _installment_id: target.id,
+            _destino: pay.shortfall_action,
+            _target_installment_id:
+              pay.shortfall_action === "parcela" ? pay.shortfall_installment_id : undefined,
+            _due_date: pay.shortfall_action === "nova" ? pay.shortfall_due_date : undefined,
+          }),
+        );
+        // O recebimento já está gravado. Se o saldo não puder ser movido, é
+        // melhor dizer exatamente isso do que deixar parecer que a baixa falhou.
+        if (saldoError)
+          throw new Error(
+            `Recebimento registrado, mas o saldo não foi movido: ${friendlyError(saldoError)}`,
+          );
+        saldoMovido = shortfall;
+      }
+
       // O que sobra para a cliente decide se vale oferecer o repasse na sequência.
-      return { receiptId, clientReceivedByFirm, clienteNome: clientNameOf(target) };
+      return { receiptId, clientReceivedByFirm, clienteNome: clientNameOf(target), saldoMovido };
     },
     onSuccess: (info) => {
-      toast.success("Recebimento registrado.");
+      toast.success(
+        info?.saldoMovido
+          ? `Recebimento registrado e ${money(info.saldoMovido)} passados para outra parcela.`
+          : "Recebimento registrado.",
+      );
       setTarget(null);
       void qc.invalidateQueries();
       // Dinheiro da cliente que passou pela conta do escritório vira repasse.
@@ -663,7 +773,7 @@ function ParcelasPage() {
                 min="0"
                 step="0.01"
                 value={pay.total_amount}
-                onChange={(e) => setPay({ ...pay, total_amount: e.target.value })}
+                onChange={(e) => changeTotal(e.target.value)}
               />
             </div>
             <div className="space-y-2 sm:col-span-2">
@@ -856,6 +966,90 @@ function ParcelasPage() {
                 onChange={(e) => setPay({ ...pay, reference: e.target.value })}
               />
             </div>
+            {shortfall > 0.01 && (
+              <div className="space-y-3 rounded-md border border-info/40 bg-info/5 p-3 sm:col-span-2">
+                <p className="text-sm font-medium">
+                  Faltam <span className="num">{money(shortfall)}</span> nesta parcela. O que
+                  fazer com esse valor?
+                </p>
+                <Select
+                  value={pay.shortfall_action}
+                  onValueChange={(v) => setPay({ ...pay, shortfall_action: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="manter">Deixar em aberto nesta parcela</SelectItem>
+                    <SelectItem value="parcela" disabled={irmasEmAberto.length === 0}>
+                      Somar em outra parcela deste acordo
+                    </SelectItem>
+                    <SelectItem value="nova">Cobrar numa parcela nova</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {pay.shortfall_action === "parcela" && (
+                  <div className="space-y-2">
+                    <Label>Parcela que vai receber o saldo</Label>
+                    <Select
+                      value={pay.shortfall_installment_id}
+                      onValueChange={(v) => setPay({ ...pay, shortfall_installment_id: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Escolha a parcela" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {irmasEmAberto.map((r) => (
+                          <SelectItem key={r.id} value={r.id}>
+                            {r.label || `Parcela ${r.number ?? "—"}`} — vence{" "}
+                            {r.due_date ? dateBR(r.due_date) : "a definir"} —{" "}
+                            {money(num(r.balance))}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {pay.shortfall_installment_id && (
+                      <p className="text-xs text-muted-foreground">
+                        Ela passa a valer{" "}
+                        <strong className="num">
+                          {money(
+                            num(
+                              irmasEmAberto.find((r) => r.id === pay.shortfall_installment_id)
+                                ?.gross_amount,
+                            ) + shortfall,
+                          )}
+                        </strong>
+                        .
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {pay.shortfall_action === "nova" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="saldo-venc">Vencimento da parcela nova</Label>
+                    <Input
+                      id="saldo-venc"
+                      type="date"
+                      value={pay.shortfall_due_date}
+                      onChange={(e) => setPay({ ...pay, shortfall_due_date: e.target.value })}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Cria uma parcela de <span className="num">{money(shortfall)}</span> nessa
+                      data, com a mesma composição do que ficou faltando.
+                    </p>
+                  </div>
+                )}
+
+                {pay.shortfall_action !== "manter" && (
+                  <p className="text-xs text-muted-foreground">
+                    Esta parcela passa a valer{" "}
+                    <strong className="num">{money(num(Number(pay.total_amount)))}</strong> e fica
+                    quitada. O total do acordo não muda — o valor só troca de parcela.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="obs">Observações</Label>
               <Textarea
