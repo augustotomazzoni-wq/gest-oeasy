@@ -891,6 +891,7 @@ export type Database = {
           description: string | null
           expected_client_amount: number
           expected_firm_amount: number
+          fee_base_extra_amount: number
           fee_fixed_amount: number | null
           fee_percent: number | null
           flow: Database["public"]["Enums"]["flow_type"]
@@ -918,6 +919,7 @@ export type Database = {
           description?: string | null
           expected_client_amount?: number
           expected_firm_amount?: number
+          fee_base_extra_amount?: number
           fee_fixed_amount?: number | null
           fee_percent?: number | null
           flow?: Database["public"]["Enums"]["flow_type"]
@@ -945,6 +947,7 @@ export type Database = {
           description?: string | null
           expected_client_amount?: number
           expected_firm_amount?: number
+          fee_base_extra_amount?: number
           fee_fixed_amount?: number | null
           fee_percent?: number | null
           flow?: Database["public"]["Enums"]["flow_type"]
@@ -1498,6 +1501,7 @@ export type Database = {
           _description?: string
           _expected_client_amount?: number
           _expected_firm_amount?: number
+          _fee_base_extra_amount?: number
           _fee_fixed_amount?: number
           _fee_percent?: number
           _flow?: string
@@ -1625,6 +1629,7 @@ export type Database = {
           _description?: string
           _expected_client_amount?: number
           _expected_firm_amount?: number
+          _fee_base_extra_amount?: number
           _fee_fixed_amount?: number
           _fee_percent?: number
           _flow?: string

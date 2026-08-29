@@ -88,13 +88,25 @@ GRANT EXECUTE ON FUNCTION public.delete_loan(uuid) TO authenticated;
 -- ============================================================
 DO $faxina$
 DECLARE
-  _orfaos jsonb;
-  _org uuid;
+  _n integer := 0;
 BEGIN
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb),
-         min(t.organization_id)
-    INTO _orfaos, _org
+  -- Guarda no log antes de apagar, uma linha por organização.
+  INSERT INTO public.audit_logs (
+    organization_id, user_email, action, table_name, old_values
+  )
+  SELECT t.organization_id, 'sistema', 'faxina_emprestimo_orfao',
+         'financial_transactions', jsonb_agg(to_jsonb(t))
   FROM public.financial_transactions t
+  WHERE t.loan_id IS NULL
+    AND t.is_financing
+    AND (
+      (t.type = 'entrada' AND t.description LIKE 'Empréstimo recebido - %')
+      OR (t.type = 'saida' AND t.status <> 'pago'
+          AND t.description ~ '^Parcela [0-9]+/[0-9]+ - ')
+    )
+  GROUP BY t.organization_id;
+
+  DELETE FROM public.financial_transactions t
   WHERE t.loan_id IS NULL
     AND t.is_financing
     AND (
@@ -103,24 +115,7 @@ BEGIN
           AND t.description ~ '^Parcela [0-9]+/[0-9]+ - ')
     );
 
-  IF jsonb_array_length(_orfaos) > 0 THEN
-    INSERT INTO public.audit_logs (
-      organization_id, user_email, action, table_name, old_values
-    ) VALUES (
-      _org, 'sistema', 'faxina_emprestimo_orfao', 'financial_transactions', _orfaos
-    );
-
-    DELETE FROM public.financial_transactions t
-    WHERE t.loan_id IS NULL
-      AND t.is_financing
-      AND (
-        (t.type = 'entrada' AND t.description LIKE 'Empréstimo recebido - %')
-        OR (t.type = 'saida' AND t.status <> 'pago'
-            AND t.description ~ '^Parcela [0-9]+/[0-9]+ - ')
-      );
-
-    RAISE NOTICE 'Faxina: % lançamento(s) órfão(s) de empréstimo removido(s).',
-      jsonb_array_length(_orfaos);
-  END IF;
+  GET DIAGNOSTICS _n = ROW_COUNT;
+  RAISE NOTICE 'Faxina: % lancamento(s) orfao(s) de emprestimo removido(s).', _n;
 END;
 $faxina$;

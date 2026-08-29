@@ -236,6 +236,9 @@ const EMPTY = {
   gross_amount: "",
   fee_percent: "",
   fee_fixed_amount: "",
+  // Dinheiro que a cliente já recebeu por fora (FGTS liberado na conta
+  // vinculada, alvará sacado direto). Só entra na base do percentual.
+  fee_base_extra_amount: "",
   success_fee_amount: "",
   success_fee_included: false,
   cost_reimbursement: "",
@@ -286,6 +289,7 @@ function AcordosPage() {
     expected_client_amount: "",
     fee_percent: "",
     fee_fixed_amount: "",
+    fee_base_extra_amount: "",
     flow: "escritorio_recebe_total",
     is_estimated: false,
   });
@@ -302,6 +306,7 @@ function AcordosPage() {
     "gross_amount",
     "fee_percent",
     "fee_fixed_amount",
+    "fee_base_extra_amount",
     "success_fee_amount",
     "success_fee_included",
     "cost_reimbursement",
@@ -374,7 +379,18 @@ function AcordosPage() {
   // sucumbência e não há repasse. É o oposto do acordo, onde o valor bruto é
   // da cliente e o escritório fica com um percentual.
   const isServiceFee = form.type === "honorarios";
-  const feeFromPercent = form.fee_percent ? (gross * num(Number(form.fee_percent))) / 100 : 0;
+  // Valor que a cliente recebeu direto — FGTS liberado na conta vinculada,
+  // alvará sacado por ela. O contrato cobra o percentual sobre ele, mas o
+  // dinheiro nunca passa por aqui: fica fora do bruto, do cronograma, do caixa
+  // e do repasse. Só engorda a base do percentual, e o honorário a mais sai da
+  // parte que a cliente receberia do que transita.
+  const feeBaseExtra = isServiceFee ? 0 : num(Number(form.fee_base_extra_amount));
+  const feeBase = gross + feeBaseExtra;
+  const feePercentValue = form.fee_percent ? num(Number(form.fee_percent)) : 0;
+  const feeFromPercent = form.fee_percent ? (feeBase * feePercentValue) / 100 : 0;
+  // Quanto do honorário vem do valor recebido direto — só para mostrar na
+  // tela; a conta em si já está no feeFromPercent.
+  const feeOverExtra = form.fee_percent ? (feeBaseExtra * feePercentValue) / 100 : 0;
   const contractualFee = isServiceFee
     ? gross
     : form.fee_percent
@@ -392,8 +408,16 @@ function AcordosPage() {
     gross - contractualFee - costs - (successInsideGross ? successFee : 0),
     0,
   );
-  // Quanto o cronograma inteiro deve somar, partindo do valor bruto.
-  const expectedGrossTotal = gross + (successInsideGross ? 0 : successFee);
+  // Quanto o cronograma inteiro deve somar. Na conta normal isso dá exatamente
+  // o valor bruto (mais a sucumbência, quando ela vem por fora), porque o
+  // honorário sai de dentro da parte da cliente. Quando o honorário passa do
+  // que transita — acordo pequeno com FGTS grande recebido direto — a cliente
+  // fica devendo a diferença, e o total sobe junto.
+  const expectedGrossTotal = round2(suggestedFirm + suggestedClient + costs);
+  // Só o dinheiro que transita — é o que o resumo mostra como "bruto +
+  // sucumbência". Fica separado do total acima porque o honorário sobre o
+  // valor recebido direto pode fazer o total passar do que transita.
+  const grossPlusSuccess = round2(gross + (successInsideGross ? 0 : successFee));
   const firm = form.expected_firm_amount ? num(Number(form.expected_firm_amount)) : suggestedFirm;
   const client = isServiceFee
     ? 0
@@ -565,7 +589,9 @@ function AcordosPage() {
     if (!clienteRecebeDireto && gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > tolTotal)
       errors.push(
         `O total distribuído (${money(expectedTotal)}) não fecha com o valor bruto` +
-          `${successInsideGross ? "" : " + sucumbência"} (${money(expectedGrossTotal)}) — ` +
+          `${successInsideGross ? "" : " + sucumbência"}` +
+          `${feeBaseExtra > 0.01 ? " + honorário sobre o valor recebido direto" : ""}` +
+          ` (${money(expectedGrossTotal)}) — ` +
           `${faltaOuSobra(expectedTotal, expectedGrossTotal)} na divisão entre escritório e cliente.`,
       );
     return [...new Set(errors)];
@@ -573,6 +599,7 @@ function AcordosPage() {
     clientNoCronograma,
     clienteRecebeDireto,
     costs,
+    feeBaseExtra,
     firm,
     gross,
     expectedGrossTotal,
@@ -729,6 +756,7 @@ function AcordosPage() {
         _gross_amount: gross,
         _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
         _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
+        _fee_base_extra_amount: feeBaseExtra,
         _success_fee_amount: successFee,
         _cost_reimbursement: costsGravado,
         _expected_firm_amount: firmGravado,
@@ -790,6 +818,7 @@ function AcordosPage() {
           _fee_fixed_amount: editForm.fee_fixed_amount
             ? num(Number(editForm.fee_fixed_amount))
             : undefined,
+          _fee_base_extra_amount: num(Number(editForm.fee_base_extra_amount)),
           _flow: editForm.flow || undefined,
           _is_estimated: editForm.is_estimated,
         }),
@@ -960,6 +989,7 @@ function AcordosPage() {
                                   type: v,
                                   fee_percent: "",
                                   fee_fixed_amount: "",
+                                  fee_base_extra_amount: "",
                                   success_fee_amount: "",
                                   success_fee_included: false,
                                   cost_reimbursement: "",
@@ -1051,6 +1081,39 @@ function AcordosPage() {
                         value={form.fee_fixed_amount}
                         onChange={(e) => updateForm({ fee_fixed_amount: e.target.value })}
                       />
+                    </div>
+                    <div className={`space-y-2 sm:col-span-2 ${isServiceFee ? "hidden" : ""}`}>
+                      <Label htmlFor="direto">
+                        Valor recebido direto pela cliente (FGTS, alvará)
+                      </Label>
+                      <Input
+                        id="direto"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={form.fee_base_extra_amount}
+                        onChange={(e) => updateForm({ fee_base_extra_amount: e.target.value })}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Dinheiro que a cliente sacou sozinha e nunca passa pelo escritório. Entra só
+                        na base do percentual de honorários — fica fora do valor bruto, do
+                        cronograma, do caixa e do repasse.
+                      </p>
+                      {feeBaseExtra > 0 && !form.fee_percent && (
+                        <p className="text-xs text-warning">
+                          Sem % de honorários este valor não muda nada: informe o percentual, ou
+                          cobre o honorário pelo campo de valor fixo.
+                        </p>
+                      )}
+                      {feeBaseExtra > 0 && !!form.fee_percent && (
+                        <p className="text-xs text-info">
+                          Base do percentual: {money(gross)} + {money(feeBaseExtra)} ={" "}
+                          <strong className="num">{money(feeBase)}</strong> → honorários de{" "}
+                          <strong className="num">{money(feeFromPercent)}</strong>, sendo{" "}
+                          <strong className="num">{money(feeOverExtra)}</strong> por conta do valor
+                          recebido direto.
+                        </p>
+                      )}
                     </div>
                     <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label htmlFor="suc">Sucumbência</Label>
@@ -1396,11 +1459,21 @@ function AcordosPage() {
                                 {" "}
                                 + sucumbência de {money(successFee)} por fora ={" "}
                                 <strong className="num text-foreground">
-                                  {money(expectedGrossTotal)}
+                                  {money(grossPlusSuccess)}
                                 </strong>
                                 .
                               </>
                             ))}
+                        </p>
+                      )}
+                      {feeBaseExtra > 0 && (
+                        <p className="mb-3 border-b border-border pb-3 text-xs text-muted-foreground">
+                          A cliente recebeu{" "}
+                          <strong className="num text-foreground">{money(feeBaseExtra)}</strong>{" "}
+                          direto. Isso só aumentou a base dos honorários (
+                          <strong className="num text-foreground">{money(feeBase)}</strong>
+                          {feeOverExtra > 0 && <> — {money(feeOverExtra)} a mais de honorário</>}).
+                          O valor em si não entra no cronograma, no caixa nem no repasse.
                         </p>
                       )}
                       <div className="grid gap-2 sm:grid-cols-2">
@@ -1742,6 +1815,9 @@ function AcordosPage() {
                               fee_fixed_amount: r.fee_fixed_amount
                                 ? String(num(r.fee_fixed_amount))
                                 : "",
+                              fee_base_extra_amount: r.fee_base_extra_amount
+                                ? String(num(r.fee_base_extra_amount))
+                                : "",
                               flow: r.flow ?? "escritorio_recebe_total",
                               is_estimated: !!r.is_estimated,
                             });
@@ -1886,6 +1962,23 @@ function AcordosPage() {
                 value={editForm.cost_reimbursement}
                 onChange={(e) => setEditForm({ ...editForm, cost_reimbursement: e.target.value })}
               />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="edireto">Valor recebido direto pela cliente (FGTS, alvará)</Label>
+              <Input
+                id="edireto"
+                type="number"
+                step="0.01"
+                min="0"
+                value={editForm.fee_base_extra_amount}
+                onChange={(e) =>
+                  setEditForm({ ...editForm, fee_base_extra_amount: e.target.value })
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Entra só na base do percentual de honorários. Mudar aqui não recalcula sozinho os
+                valores esperados abaixo — ajuste-os na mão se for o caso.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="efirm">Esperado do escritório</Label>
