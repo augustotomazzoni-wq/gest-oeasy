@@ -1621,6 +1621,8 @@ export type Database = {
           _description?: string
           _expected_client_amount?: number
           _expected_firm_amount?: number
+          _fee_fixed_amount?: number
+          _fee_percent?: number
           _flow?: string
           _gross_amount?: number
           _id: string
@@ -1639,6 +1641,7 @@ export type Database = {
           _destination_info?: string
           _id: string
           _notes?: string
+          _paid_on?: string
           _scheduled_for?: string
           _status?: string
         }

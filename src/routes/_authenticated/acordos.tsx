@@ -232,6 +232,10 @@ function AcordosPage() {
     cost_reimbursement: "",
     expected_firm_amount: "",
     expected_client_amount: "",
+    fee_percent: "",
+    fee_fixed_amount: "",
+    flow: "escritorio_recebe_total",
+    is_estimated: false,
   });
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -621,6 +625,12 @@ function AcordosPage() {
           _cost_reimbursement: num(Number(editForm.cost_reimbursement)),
           _expected_firm_amount: num(Number(editForm.expected_firm_amount)),
           _expected_client_amount: num(Number(editForm.expected_client_amount)),
+          _fee_percent: editForm.fee_percent ? num(Number(editForm.fee_percent)) : undefined,
+          _fee_fixed_amount: editForm.fee_fixed_amount
+            ? num(Number(editForm.fee_fixed_amount))
+            : undefined,
+          _flow: editForm.flow || undefined,
+          _is_estimated: editForm.is_estimated,
         }),
       );
       if (error) throw error;
@@ -1510,6 +1520,12 @@ function AcordosPage() {
                               cost_reimbursement: String(num(r.cost_reimbursement)),
                               expected_firm_amount: String(num(r.expected_firm_amount)),
                               expected_client_amount: String(num(r.expected_client_amount)),
+                              fee_percent: r.fee_percent ? String(num(r.fee_percent)) : "",
+                              fee_fixed_amount: r.fee_fixed_amount
+                                ? String(num(r.fee_fixed_amount))
+                                : "",
+                              flow: r.flow ?? "escritorio_recebe_total",
+                              is_estimated: !!r.is_estimated,
                             });
                           }}
                         >
@@ -1676,6 +1692,69 @@ function AcordosPage() {
                 }
               />
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="epct">% honorários contratuais</Label>
+              <Input
+                id="epct"
+                type="number"
+                step="0.01"
+                value={editForm.fee_percent}
+                onChange={(e) => setEditForm({ ...editForm, fee_percent: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="efix">Honorários fixos</Label>
+              <Input
+                id="efix"
+                type="number"
+                step="0.01"
+                value={editForm.fee_fixed_amount}
+                onChange={(e) => setEditForm({ ...editForm, fee_fixed_amount: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Processo</Label>
+              <Select
+                value={editForm.case_id}
+                onValueChange={(v) => setEditForm({ ...editForm, case_id: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Sem processo" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(data?.cases ?? []).map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.case_number || "sem número"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Forma do fluxo</Label>
+              <Select
+                value={editForm.flow}
+                onValueChange={(v) => setEditForm({ ...editForm, flow: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(FLOW_LABEL).map(([k, v]) => (
+                    <SelectItem key={k} value={k}>
+                      {v}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <label className="flex items-center gap-2 text-sm sm:col-span-2">
+              <Checkbox
+                checked={editForm.is_estimated}
+                onCheckedChange={(v) => setEditForm({ ...editForm, is_estimated: v === true })}
+              />
+              Valor estimado (a confirmar)
+            </label>
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="enotes">Observações</Label>
               <Textarea

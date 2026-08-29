@@ -77,6 +77,7 @@ function RepassesPage() {
     destination_info: "",
     notes: "",
     status: "pendente",
+    paid_on: "",
   });
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -230,6 +231,7 @@ function RepassesPage() {
           _destination_info: editForm.destination_info.trim() || undefined,
           _notes: editForm.notes.trim() || undefined,
           _status: editForm.status || undefined,
+          _paid_on: editForm.status === "pago" ? editForm.paid_on || undefined : undefined,
         }),
       );
       if (error) throw error;
@@ -452,9 +454,9 @@ function RepassesPage() {
             <thead>
               <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
                 <th className="p-3">Cliente</th>
-                <th className="text-right">Valor</th>
-                <th>Previsão</th>
-                <th>Pago em</th>
+                <th className="px-4 text-right">Valor</th>
+                <th className="px-3">Previsão</th>
+                <th className="px-3">Pago em</th>
                 <th>Situação</th>
                 <th className="p-3" />
               </tr>
@@ -479,9 +481,9 @@ function RepassesPage() {
                   <td className="p-3 font-medium">
                     {(t.clients as { name: string } | null)?.name ?? "—"}
                   </td>
-                  <td className="num text-right">{money(t.amount)}</td>
-                  <td>{dateBR(t.scheduled_for)}</td>
-                  <td>{dateBR(t.paid_on)}</td>
+                  <td className="num px-4 text-right whitespace-nowrap">{money(t.amount)}</td>
+                  <td className="px-3 whitespace-nowrap">{dateBR(t.scheduled_for)}</td>
+                  <td className="px-3 whitespace-nowrap">{dateBR(t.paid_on)}</td>
                   <td>
                     <TransferStatusTag status={t.status} />
                   </td>
@@ -497,9 +499,10 @@ function RepassesPage() {
                         Marcar pago
                       </Button>
                     )}
-                    {/* Repasse pago já mexeu no caixa: para corrigir, cancela
-                        e cria outro. Por isso só edita o que está pendente. */}
-                    {canEdit && t.status !== "pago" && t.status !== "cancelado" && (
+                    {/* Editar também depois de pago: o gatilho do caixa
+                        reespelha o lançamento sozinho a cada alteração. Só
+                        repasse cancelado fica fora. */}
+                    {canEdit && t.status !== "cancelado" && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -515,6 +518,7 @@ function RepassesPage() {
                             destination_info: t.destination_info ?? "",
                             notes: t.notes ?? "",
                             status: t.status,
+                            paid_on: t.paid_on ?? "",
                           });
                         }}
                       >
@@ -656,6 +660,7 @@ function RepassesPage() {
                 <SelectContent>
                   <SelectItem value="pendente">Pendente</SelectItem>
                   <SelectItem value="agendado">Agendado</SelectItem>
+                  <SelectItem value="pago">Pago</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -677,6 +682,20 @@ function RepassesPage() {
                 </SelectContent>
               </Select>
             </div>
+            {editForm.status === "pago" && (
+              <div className="space-y-2 sm:col-span-2">
+                <Label htmlFor="epago">Pago em</Label>
+                <Input
+                  id="epago"
+                  type="date"
+                  value={editForm.paid_on}
+                  onChange={(e) => setEditForm({ ...editForm, paid_on: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  É esta data que vale no fluxo de caixa e no saldo da conta.
+                </p>
+              </div>
+            )}
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="edest">PIX / conta da cliente</Label>
               <Input
