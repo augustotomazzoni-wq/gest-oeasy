@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag, ReceivableStatusTag } from "@/components/StatusBadge";
@@ -67,6 +67,47 @@ type DistributionMode =
   | "escritorio_primeiro"
   | "meio_a_meio"
   | "manual";
+
+/**
+ * Uma parcela sendo editada no acordo pronto. Os campos de dinheiro e data são
+ * texto porque vêm de inputs; `paid` e `canceled` não se editam — servem para
+ * decidir o que pode ser mexido e o que precisa de autorização.
+ */
+type EditParcela = {
+  id: string;
+  label: string;
+  due_date: string;
+  gross_amount: string;
+  /** Honorário + sucumbência juntos, que é como a tabela mostra. */
+  firm_amount: string;
+  client_amount: string;
+  cost_reimbursement: string;
+  /**
+   * Como a parte do escritório estava dividida antes da edição. É por ela que
+   * o valor digitado volta a se dividir entre honorário e sucumbência na hora
+   * de salvar — uma parcela de sucumbência continua sendo sucumbência.
+   */
+  origFee: number;
+  origSuccess: number;
+  numero: number | null;
+  stream: string | null;
+  paid: number;
+  canceled: boolean;
+};
+
+/** Divide a parte do escritório de volta entre honorário e sucumbência. */
+function dividirParteDoEscritorio(parcela: EditParcela) {
+  const firm = num(Number(parcela.firm_amount));
+  const soma = round2(parcela.origFee + parcela.origSuccess);
+  if (soma > 0.01) {
+    const fee = round2((firm * parcela.origFee) / soma);
+    return { fee_amount: fee, success_fee_amount: round2(firm - fee) };
+  }
+  // Parcela que ainda não tinha valor do escritório: vale a origem dela.
+  return parcela.stream === "sucumbencia"
+    ? { fee_amount: 0, success_fee_amount: firm }
+    : { fee_amount: firm, success_fee_amount: 0 };
+}
 
 type ScheduleRow = {
   label: string;
@@ -375,6 +416,12 @@ function AcordosPage() {
     flow: "escritorio_recebe_total",
     is_estimated: false,
   });
+  // Cronograma do acordo pronto, editável junto com os dados dele.
+  const [editSchedule, setEditSchedule] = useState<EditParcela[]>([]);
+  // Parcela já recebida é histórico: só se mexe nela com autorização expressa,
+  // e o motivo fica registrado na auditoria.
+  const [allowPaidEdit, setAllowPaidEdit] = useState(false);
+  const [paidEditReason, setPaidEditReason] = useState("");
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>(1);
@@ -902,6 +949,144 @@ function AcordosPage() {
     onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
   });
 
+  /** Parcelas do acordo que está aberto para edição. */
+  const { data: parcelasDoAcordo, isLoading: parcelasLoading } = useQuery({
+    queryKey: ["acordo-parcelas", editTarget?.id],
+    enabled: !!editTarget,
+    queryFn: async () => {
+      const { data: rows, error } = await supabase
+        .from("v_installments")
+        .select(
+          "id, label, number, due_date, gross_amount, fee_amount, success_fee_amount, client_amount, cost_reimbursement, paid_total, canceled_at, stream",
+        )
+        .eq("receivable_id", editTarget!.id)
+        .order("due_date", { ascending: true, nullsFirst: false })
+        .order("number", { ascending: true });
+      if (error) throw error;
+      return (rows ?? []) as unknown as {
+        id: string;
+        label: string | null;
+        number: number | null;
+        due_date: string | null;
+        gross_amount: number | null;
+        fee_amount: number | null;
+        success_fee_amount: number | null;
+        client_amount: number | null;
+        cost_reimbursement: number | null;
+        paid_total: number | null;
+        canceled_at: string | null;
+        stream: string | null;
+      }[];
+    },
+  });
+
+  // Carrega o cronograma no formulário assim que ele chega, e a cada recarga
+  // depois de salvar — o que estiver digitado e não salvo é substituído pelo
+  // que o banco tem, que é o que vale.
+  useEffect(() => {
+    if (!parcelasDoAcordo) return;
+    setEditSchedule(
+      parcelasDoAcordo.map((p) => ({
+        id: p.id,
+        label: p.label ?? "",
+        due_date: p.due_date ?? "",
+        gross_amount: String(num(p.gross_amount)),
+        firm_amount: String(round2(num(p.fee_amount) + num(p.success_fee_amount))),
+        client_amount: String(num(p.client_amount)),
+        cost_reimbursement: String(num(p.cost_reimbursement)),
+        origFee: num(p.fee_amount),
+        origSuccess: num(p.success_fee_amount),
+        numero: p.number,
+        stream: p.stream,
+        paid: num(p.paid_total),
+        canceled: !!p.canceled_at,
+      })),
+    );
+  }, [parcelasDoAcordo]);
+
+  const temParcelaPaga = editSchedule.some((p) => p.paid > 0.01);
+
+  /** Só as parcelas que a pessoa realmente pode mexer agora. */
+  function podeEditar(parcela: EditParcela) {
+    if (parcela.canceled) return false;
+    return parcela.paid <= 0.01 || allowPaidEdit;
+  }
+
+  /**
+   * Muda uma parcela e fecha a conta sozinha.
+   *
+   * O banco recusa parcela em que escritório + cliente + reembolso não somam o
+   * total, então a coluna que a pessoa não tocou se ajusta: mexeu no total, no
+   * escritório ou no reembolso, a parte da cliente absorve; mexeu na parte da
+   * cliente, o total é que sobe ou desce.
+   */
+  function updateParcela(id: string, patch: Partial<EditParcela>) {
+    setEditSchedule((current) =>
+      current.map((p) => {
+        if (p.id !== id) return p;
+        const atualizada = { ...p, ...patch };
+        const firm = num(Number(atualizada.firm_amount));
+        const client = num(Number(atualizada.client_amount));
+        const costs = num(Number(atualizada.cost_reimbursement));
+        if ("client_amount" in patch) {
+          return { ...atualizada, gross_amount: String(round2(firm + client + costs)) };
+        }
+        if (
+          "gross_amount" in patch ||
+          "firm_amount" in patch ||
+          "cost_reimbursement" in patch
+        ) {
+          const total = num(Number(atualizada.gross_amount));
+          return {
+            ...atualizada,
+            client_amount: String(Math.max(round2(total - firm - costs), 0)),
+          };
+        }
+        return atualizada;
+      }),
+    );
+  }
+
+  /** Soma do cronograma, para conferir com o que o acordo espera receber. */
+  const totaisDoCronograma = useMemo(
+    () =>
+      editSchedule
+        .filter((p) => !p.canceled)
+        .reduce(
+          (total, p) => ({
+            gross: round2(total.gross + num(Number(p.gross_amount))),
+            firm: round2(total.firm + num(Number(p.firm_amount))),
+            client: round2(total.client + num(Number(p.client_amount))),
+            costs: round2(total.costs + num(Number(p.cost_reimbursement))),
+          }),
+          { gross: 0, firm: 0, client: 0, costs: 0 },
+        ),
+    [editSchedule],
+  );
+
+  // Quanto o cronograma deveria somar, pelos valores do próprio formulário.
+  // Segue a mesma regra do cadastro: o dinheiro que a cliente recebe direto —
+  // por fluxo ou por já ter sacado — não entra no cronograma.
+  const clienteForaNaEdicao =
+    editForm.flow === "cliente_recebe_direto" || editForm.flow === "recebimento_dividido";
+  const clienteNoCronogramaNaEdicao = clienteForaNaEdicao
+    ? 0
+    : Math.max(
+        round2(
+          num(Number(editForm.expected_client_amount)) -
+            num(Number(editForm.fee_base_extra_amount)),
+        ),
+        0,
+      );
+  const totalEsperadoNaEdicao = round2(
+    num(Number(editForm.expected_firm_amount)) +
+      clienteNoCronogramaNaEdicao +
+      num(Number(editForm.cost_reimbursement)),
+  );
+  const divergenciaDoCronograma = Math.abs(
+    round2(totaisDoCronograma.gross - totalEsperadoNaEdicao),
+  );
+
   const updateReceivable = useMutation({
     mutationFn: async () => {
       if (!editTarget) throw new Error("Acordo inválido");
@@ -935,10 +1120,74 @@ function AcordosPage() {
         }),
       );
       if (error) throw error;
+
+      // Só sobem as parcelas que realmente mudaram: uma chamada por parcela
+      // mexida, em vez de reescrever o cronograma inteiro a cada salvamento.
+      const original = new Map((parcelasDoAcordo ?? []).map((p) => [p.id, p]));
+      const alteradas = editSchedule.filter((p) => {
+        const antes = original.get(p.id);
+        if (!antes || !podeEditar(p)) return false;
+        const firmAntes = round2(num(antes.fee_amount) + num(antes.success_fee_amount));
+        return (
+          p.label !== (antes.label ?? "") ||
+          p.due_date !== (antes.due_date ?? "") ||
+          Math.abs(num(Number(p.gross_amount)) - num(antes.gross_amount)) > 0.001 ||
+          Math.abs(num(Number(p.firm_amount)) - firmAntes) > 0.001 ||
+          Math.abs(num(Number(p.client_amount)) - num(antes.client_amount)) > 0.001 ||
+          Math.abs(num(Number(p.cost_reimbursement)) - num(antes.cost_reimbursement)) > 0.001
+        );
+      });
+
+      const pagasAlteradas = alteradas.filter((p) => p.paid > 0.01);
+      if (pagasAlteradas.length && !paidEditReason.trim())
+        throw new Error("Informe o motivo para alterar parcelas que já receberam pagamento");
+
+      for (const parcela of alteradas) {
+        const partes = dividirParteDoEscritorio(parcela);
+        const { error: parcelaError } = await supabase.rpc("update_installment", {
+          _id: parcela.id,
+          _label: parcela.label.trim() || undefined,
+          _due_date: parcela.due_date || undefined,
+          _gross_amount: num(Number(parcela.gross_amount)),
+          _fee_amount: partes.fee_amount,
+          _success_fee_amount: partes.success_fee_amount,
+          _client_amount: num(Number(parcela.client_amount)),
+          _cost_reimbursement: num(Number(parcela.cost_reimbursement)),
+        });
+        if (parcelaError)
+          throw new Error(
+            `${parcela.label || `Parcela ${parcela.numero ?? ""}`}: ${friendlyError(parcelaError)}`,
+          );
+      }
+
+      // Mexer em parcela já recebida é exceção: fica registrado quem autorizou,
+      // quais parcelas e por quê.
+      if (pagasAlteradas.length && profile) {
+        await supabase.from("audit_logs").insert({
+          organization_id: profile.organization_id,
+          user_id: profile.id,
+          user_email: profile.email,
+          action: "editar_parcela_paga",
+          table_name: "installments",
+          record_id: editTarget.id,
+          new_values: {
+            motivo: paidEditReason.trim(),
+            parcelas: pagasAlteradas.map((p) => p.label || `Parcela ${p.numero ?? ""}`),
+          },
+        });
+      }
+
+      return alteradas.length;
     },
-    onSuccess: () => {
-      toast.success("Acordo atualizado.");
+    onSuccess: (quantas) => {
+      toast.success(
+        quantas
+          ? `Acordo atualizado e ${quantas} ${quantas === 1 ? "parcela alterada" : "parcelas alteradas"}.`
+          : "Acordo atualizado.",
+      );
       setEditTarget(null);
+      setAllowPaidEdit(false);
+      setPaidEditReason("");
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro ao editar", { description: friendlyError(e) }),
@@ -2030,14 +2279,25 @@ function AcordosPage() {
         </table>
       </div>
 
-      <Dialog open={!!editTarget} onOpenChange={(v) => !v && setEditTarget(null)}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      <Dialog
+        open={!!editTarget}
+        onOpenChange={(v) => {
+          if (!v) {
+            setEditTarget(null);
+            setEditSchedule([]);
+            setAllowPaidEdit(false);
+            setPaidEditReason("");
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-4xl">
           <DialogHeader>
             <DialogTitle>Editar acordo</DialogTitle>
             <DialogDescription>
-              {editTarget?.name} — o que já foi recebido não pode ser desfeito por aqui: os
-              valores esperados não podem ficar abaixo do que já entrou. Para mexer no que já foi
-              pago, estorne o recebimento antes.
+              {editTarget?.name} — dá para mexer nos valores do acordo e no cronograma, datas
+              incluídas. O que já entrou não pode ser desfeito por aqui: nem o acordo nem uma
+              parcela podem ficar valendo menos do que já foi recebido. Para isso, estorne o
+              recebimento antes.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -2253,10 +2513,192 @@ function AcordosPage() {
                 onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
               />
             </div>
-            <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground sm:col-span-2">
-              Editar aqui muda o acordo, não o cronograma já gerado. As parcelas continuam como
-              estão — ajuste-as em Parcelas e Recebimentos se os valores mudaram.
-            </p>
+            <div className="space-y-3 sm:col-span-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-sm font-medium">Cronograma de parcelas</h3>
+                <p className="text-xs text-muted-foreground">
+                  Somam{" "}
+                  <strong className="num text-foreground">
+                    {money(totaisDoCronograma.gross)}
+                  </strong>{" "}
+                  — escritório {money(totaisDoCronograma.firm)}, cliente{" "}
+                  {money(totaisDoCronograma.client)}, reembolso{" "}
+                  {money(totaisDoCronograma.costs)}
+                </p>
+              </div>
+
+              {parcelasLoading && (
+                <p className="text-xs text-muted-foreground">Carregando parcelas…</p>
+              )}
+
+              {!parcelasLoading && editSchedule.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Este acordo ainda não tem parcelas.
+                </p>
+              )}
+
+              {temParcelaPaga && (
+                <div className="rounded-md border border-warning/40 bg-warning/5 p-3">
+                  <label className="flex items-start gap-2 text-sm">
+                    <Checkbox
+                      checked={allowPaidEdit}
+                      onCheckedChange={(v) => setAllowPaidEdit(v === true)}
+                    />
+                    <span>
+                      Alterar também as parcelas que já receberam pagamento
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
+                        Elas são histórico: mexer nelas muda relatórios já fechados. Sem marcar,
+                        só as parcelas em aberto ficam editáveis. O valor de uma parcela nunca
+                        pode ficar abaixo do que já entrou nela — para isso, estorne o
+                        recebimento antes.
+                      </span>
+                    </span>
+                  </label>
+                  {allowPaidEdit && (
+                    <div className="mt-3 space-y-2">
+                      <Label htmlFor="motivo-pagas">Motivo da alteração</Label>
+                      <Textarea
+                        id="motivo-pagas"
+                        value={paidEditReason}
+                        onChange={(e) => setPaidEditReason(e.target.value)}
+                        placeholder="Fica registrado na auditoria junto com as parcelas alteradas."
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {editSchedule.length > 0 && (
+                <div className="max-h-80 overflow-auto rounded-md border border-border">
+                  <table className="min-w-[860px] w-full text-sm">
+                    <thead className="bg-muted text-xs text-muted-foreground uppercase">
+                      <tr>
+                        <th className="p-2 text-left">Identificação</th>
+                        <th className="text-left">Vencimento</th>
+                        <th className="text-right">Total</th>
+                        <th className="text-right">Escritório</th>
+                        <th className="text-right">Cliente</th>
+                        <th className="p-2 text-right">Reembolso</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {editSchedule.map((parcela) => {
+                        const liberada = podeEditar(parcela);
+                        return (
+                          <tr key={parcela.id} className="border-t border-border/60">
+                            <td className="p-2">
+                              <Input
+                                className="min-w-28"
+                                value={parcela.label}
+                                disabled={!liberada}
+                                onChange={(e) =>
+                                  updateParcela(parcela.id, { label: e.target.value })
+                                }
+                              />
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {parcela.canceled && <Tag tone="danger">cancelada</Tag>}
+                                {parcela.paid > 0.01 && (
+                                  <Tag tone={liberada ? "warning" : "info"}>
+                                    recebeu {money(parcela.paid)}
+                                  </Tag>
+                                )}
+                                {parcela.stream === "sucumbencia" && (
+                                  <Tag tone="info">sucumbência</Tag>
+                                )}
+                                {parcela.stream === "empresa" && (
+                                  <Tag tone="info">a empresa paga</Tag>
+                                )}
+                              </div>
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                className="min-w-36"
+                                type="date"
+                                value={parcela.due_date}
+                                disabled={!liberada}
+                                onChange={(e) =>
+                                  updateParcela(parcela.id, { due_date: e.target.value })
+                                }
+                              />
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                className="min-w-28 text-right"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={parcela.gross_amount}
+                                disabled={!liberada}
+                                onChange={(e) =>
+                                  updateParcela(parcela.id, { gross_amount: e.target.value })
+                                }
+                              />
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                className="min-w-28 text-right"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={parcela.firm_amount}
+                                disabled={!liberada}
+                                onChange={(e) =>
+                                  updateParcela(parcela.id, { firm_amount: e.target.value })
+                                }
+                              />
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                className="min-w-28 text-right"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={parcela.client_amount}
+                                disabled={!liberada}
+                                onChange={(e) =>
+                                  updateParcela(parcela.id, { client_amount: e.target.value })
+                                }
+                              />
+                            </td>
+                            <td className="p-2">
+                              <Input
+                                className="min-w-28 text-right"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={parcela.cost_reimbursement}
+                                disabled={!liberada}
+                                onChange={(e) =>
+                                  updateParcela(parcela.id, {
+                                    cost_reimbursement: e.target.value,
+                                  })
+                                }
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {editSchedule.length > 0 && divergenciaDoCronograma > 0.01 && (
+                <p className="rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
+                  As parcelas somam {money(totaisDoCronograma.gross)} e o acordo espera receber{" "}
+                  {money(totalEsperadoNaEdicao)} —{" "}
+                  {faltaOuSobra(totaisDoCronograma.gross, totalEsperadoNaEdicao)} no cronograma.
+                  Dá para salvar assim, mas os relatórios vão mostrar a diferença: ajuste as
+                  parcelas ou os valores esperados acima.
+                </p>
+              )}
+
+              <p className="text-xs text-muted-foreground">
+                A coluna Escritório junta honorários e sucumbência. Mexendo no total, no
+                escritório ou no reembolso, a parte da cliente se ajusta sozinha; mexendo na parte
+                da cliente, é o total que muda — assim a parcela sempre fecha.
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTarget(null)}>
