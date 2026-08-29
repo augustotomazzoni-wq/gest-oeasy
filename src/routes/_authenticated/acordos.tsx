@@ -192,6 +192,7 @@ function AcordosPage() {
   // cronograma editado à mão deixa de valer — voltamos para a sugestão
   // recalculada, senão as parcelas continuariam somando o total antigo.
   const TOTALS_FIELDS = [
+    "type",
     "gross_amount",
     "fee_percent",
     "fee_fixed_amount",
@@ -252,10 +253,20 @@ function AcordosPage() {
   });
 
   const gross = num(Number(form.gross_amount));
+  // Honorário de serviço: cobrança que não depende do valor de nenhuma ação
+  // (consultoria, contrato, acompanhamento). O valor informado é inteiro do
+  // escritório — a cliente não recebe nada dele, então não há rateio, não há
+  // sucumbência e não há repasse. É o oposto do acordo, onde o valor bruto é
+  // da cliente e o escritório fica com um percentual.
+  const isServiceFee = form.type === "honorarios";
   const feeFromPercent = form.fee_percent ? (gross * num(Number(form.fee_percent))) / 100 : 0;
-  const contractualFee = form.fee_percent ? feeFromPercent : num(Number(form.fee_fixed_amount));
-  const successFee = num(Number(form.success_fee_amount));
-  const costs = num(Number(form.cost_reimbursement));
+  const contractualFee = isServiceFee
+    ? gross
+    : form.fee_percent
+      ? feeFromPercent
+      : num(Number(form.fee_fixed_amount));
+  const successFee = isServiceFee ? 0 : num(Number(form.success_fee_amount));
+  const costs = isServiceFee ? 0 : num(Number(form.cost_reimbursement));
   // A sucumbência é paga pela parte perdedora, então às vezes vem por fora do
   // valor do acordo e às vezes já está embutida nele. Quem cadastra informa
   // qual é o caso — antes o sistema sempre assumia "por fora" em silêncio, e o
@@ -269,9 +280,11 @@ function AcordosPage() {
   // Quanto o cronograma inteiro deve somar, partindo do valor bruto.
   const expectedGrossTotal = gross + (successInsideGross ? 0 : successFee);
   const firm = form.expected_firm_amount ? num(Number(form.expected_firm_amount)) : suggestedFirm;
-  const client = form.expected_client_amount
-    ? num(Number(form.expected_client_amount))
-    : suggestedClient;
+  const client = isServiceFee
+    ? 0
+    : form.expected_client_amount
+      ? num(Number(form.expected_client_amount))
+      : suggestedClient;
   const overridden =
     Math.abs(firm - suggestedFirm) > 0.01 || Math.abs(client - suggestedClient) > 0.01;
 
@@ -584,7 +597,25 @@ function AcordosPage() {
                       <Label>Tipo</Label>
                       <Select
                         value={form.type}
-                        onValueChange={(v) => setForm({ ...form, type: v })}
+                        onValueChange={(v) =>
+                          // Virar honorário de serviço zera o que não se aplica,
+                          // senão um percentual digitado antes iria junto no
+                          // cadastro mesmo com o campo escondido.
+                          updateForm(
+                            v === "honorarios"
+                              ? {
+                                  type: v,
+                                  fee_percent: "",
+                                  fee_fixed_amount: "",
+                                  success_fee_amount: "",
+                                  success_fee_included: false,
+                                  cost_reimbursement: "",
+                                  expected_client_amount: "",
+                                  flow: "escritorio_recebe_total",
+                                }
+                              : { type: v },
+                          )
+                        }
                       >
                         <SelectTrigger>
                           <SelectValue />
@@ -592,7 +623,7 @@ function AcordosPage() {
                         <SelectContent>
                           {Object.entries(RECEIVABLE_TYPE_LABEL).map(([k, v]) => (
                             <SelectItem key={k} value={k}>
-                              {v}
+                              {k === "honorarios" ? "Honorários de serviço" : v}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -617,7 +648,9 @@ function AcordosPage() {
                       </Select>
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="gross">Valor bruto</Label>
+                      <Label htmlFor="gross">
+                        {isServiceFee ? "Valor dos honorários" : "Valor bruto"}
+                      </Label>
                       <Input
                         id="gross"
                         type="number"
@@ -629,6 +662,11 @@ function AcordosPage() {
                       {gross <= 0 && (
                         <p className="text-xs text-destructive">Informe um valor maior que zero.</p>
                       )}
+                      {isServiceFee && gross > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Valor inteiro do escritório — a cliente não recebe nada deste acordo.
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="date">Data do acordo/decisão</Label>
@@ -639,7 +677,7 @@ function AcordosPage() {
                         onChange={(e) => setForm({ ...form, agreement_date: e.target.value })}
                       />
                     </div>
-                    <div className="space-y-2">
+                    <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label htmlFor="pct">% honorários contratuais</Label>
                       <Input
                         id="pct"
@@ -650,7 +688,7 @@ function AcordosPage() {
                         onChange={(e) => updateForm({ fee_percent: e.target.value })}
                       />
                     </div>
-                    <div className="space-y-2">
+                    <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label htmlFor="fix">Honorários fixos (se sem %)</Label>
                       <Input
                         id="fix"
@@ -661,7 +699,7 @@ function AcordosPage() {
                         onChange={(e) => updateForm({ fee_fixed_amount: e.target.value })}
                       />
                     </div>
-                    <div className="space-y-2">
+                    <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label htmlFor="suc">Sucumbência</Label>
                       <Input
                         id="suc"
@@ -690,7 +728,7 @@ function AcordosPage() {
                         </label>
                       )}
                     </div>
-                    <div className="space-y-2">
+                    <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label htmlFor="cst">Reembolso de custas</Label>
                       <Input
                         id="cst"
@@ -701,7 +739,7 @@ function AcordosPage() {
                         onChange={(e) => updateForm({ cost_reimbursement: e.target.value })}
                       />
                     </div>
-                    <div className="space-y-2">
+                    <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label>Forma do fluxo</Label>
                       <Select
                         value={form.flow}
@@ -743,10 +781,11 @@ function AcordosPage() {
                           onChange={(e) => updateForm({ expected_firm_amount: e.target.value })}
                         />
                         <p className="text-xs text-muted-foreground">
-                          Sugerido: {money(suggestedFirm)} (honorários + sucumbência)
+                          Sugerido: {money(suggestedFirm)}
+                          {isServiceFee ? " (todo o valor)" : " (honorários + sucumbência)"}
                         </p>
                       </div>
-                      <div className="space-y-2">
+                      <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                         <Label htmlFor="cli">Valor esperado do cliente</Label>
                         <Input
                           id="cli"
