@@ -219,6 +219,9 @@ function AcordosPage() {
   // Editar acordo é permissão à parte: nasce só para o Administrador e pode
   // ser liberada por perfil na tela Usuários e Perfis de Acesso.
   const canEdit = can("acordos", "edit");
+  // Excluir acordo apaga junto parcelas, recebimentos e repasses. Permissão
+  // própria, ligada só para o Administrador e liberável por perfil.
+  const canDelete = can("acordos", "delete");
   const [editTarget, setEditTarget] = useState<{ id: string; name: string } | null>(null);
   const [editForm, setEditForm] = useState({
     type: "acordo",
@@ -676,13 +679,23 @@ function AcordosPage() {
   const deleteReceivable = useMutation({
     mutationFn: async () => {
       if (!deleteTarget) throw new Error("Acordo inválido");
-      const { error } = await supabase.rpc("delete_canceled_receivable", {
-        _receivable_id: deleteTarget.id,
+      // Apaga em cascata: parcelas, recebimentos e repasses ligados ao acordo.
+      const { data: resumo, error } = await supabase.rpc("delete_receivable", {
+        _id: deleteTarget.id,
       });
       if (error) throw error;
+      return resumo as unknown as {
+        parcelas: number;
+        recebimentos: number;
+        repasses: number;
+      } | null;
     },
-    onSuccess: () => {
-      toast.success("Acordo apagado definitivamente.");
+    onSuccess: (r) => {
+      const partes = [
+        `${r?.parcelas ?? 0} parcela(s)`,
+        r?.repasses ? `${r.repasses} repasse(s)` : "",
+      ].filter(Boolean);
+      toast.success(`Acordo apagado com ${partes.join(" e ")}.`);
       setDeleteTarget(null);
       void qc.invalidateQueries();
     },
@@ -1477,7 +1490,7 @@ function AcordosPage() {
               <th className="text-right">Escritório</th>
               <th className="text-right">Cliente</th>
               <th className="text-right">Recebido</th>
-              {(canCancel || canEdit || isMainAdmin) && <th className="p-3" />}
+              {(canCancel || canEdit || canDelete || isMainAdmin) && <th className="p-3" />}
             </tr>
           </thead>
           <tbody>
@@ -1539,7 +1552,7 @@ function AcordosPage() {
                   <td className="num text-right">{money(r.expected_firm_amount)}</td>
                   <td className="num text-right">{money(r.expected_client_amount)}</td>
                   <td className="num text-right">{money(paid)}</td>
-                   {(canCancel || canEdit || isMainAdmin) && (
+                   {(canCancel || canEdit || canDelete || isMainAdmin) && (
                      <td className="p-3 text-right whitespace-nowrap">
                       {canEdit && r.status !== "cancelado" && (
                         <Button
@@ -1590,7 +1603,7 @@ function AcordosPage() {
                            Cancelar
                          </Button>
                        )}
-                       {isMainAdmin && r.status === "cancelado" && paid <= 0.01 && (
+                       {(canDelete || isMainAdmin) && paid <= 0.01 && (
                          <Button
                            size="sm"
                            variant="ghost"
@@ -1859,11 +1872,22 @@ function AcordosPage() {
       <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Apagar acordo cancelado</DialogTitle>
-            <DialogDescription>
-              O acordo de {deleteTarget?.name} e todas as suas parcelas serão apagados
-              definitivamente do sistema. Esta ação não pode ser desfeita — fica apenas o registro
-              na auditoria.
+            <DialogTitle>Apagar o acordo de {deleteTarget?.name}?</DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  Somem juntos: o acordo, <strong>todas as parcelas</strong>, os recebimentos
+                  estornados e os <strong>repasses</strong> ligados a ele.
+                </p>
+                <p>
+                  Se houver recebimento válido ou repasse já pago, a exclusão é recusada — estorne
+                  ou cancele antes, senão o caixa e o saldo do banco mudariam sozinhos.
+                </p>
+                <p>
+                  Não dá para desfazer. Fica o registro completo na auditoria, com todos os
+                  valores.
+                </p>
+              </div>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

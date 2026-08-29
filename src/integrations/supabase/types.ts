@@ -1576,6 +1576,10 @@ export type Database = {
         Args: { _id: string }
         Returns: undefined
       }
+      delete_receivable: {
+        Args: { _id: string }
+        Returns: Json
+      }
       delete_recurrence_series: {
         Args: { _group_id: string }
         Returns: number
