@@ -281,7 +281,11 @@ function AcordosPage() {
 
   const [sortBy, setSortBy] = useState("recentes");
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    name: string;
+    paid: number;
+  } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const { data, isLoading } = useQuery({
@@ -688,14 +692,21 @@ function AcordosPage() {
         parcelas: number;
         recebimentos: number;
         repasses: number;
+        recebido: number;
+        repassado: number;
       } | null;
     },
     onSuccess: (r) => {
       const partes = [
         `${r?.parcelas ?? 0} parcela(s)`,
+        r?.recebimentos ? `${r.recebimentos} recebimento(s)` : "",
         r?.repasses ? `${r.repasses} repasse(s)` : "",
       ].filter(Boolean);
-      toast.success(`Acordo apagado com ${partes.join(" e ")}.`);
+      const caixa = num(r?.recebido) + num(r?.repassado);
+      toast.success(`Acordo apagado com ${partes.join(", ")}.`, {
+        description:
+          caixa > 0.01 ? `${money(caixa)} saíram do fluxo de caixa junto.` : undefined,
+      });
       setDeleteTarget(null);
       void qc.invalidateQueries();
     },
@@ -1603,7 +1614,7 @@ function AcordosPage() {
                            Cancelar
                          </Button>
                        )}
-                       {(canDelete || isMainAdmin) && paid <= 0.01 && (
+                       {(canDelete || isMainAdmin) && (
                          <Button
                            size="sm"
                            variant="ghost"
@@ -1612,6 +1623,7 @@ function AcordosPage() {
                              setDeleteTarget({
                                id: r.id,
                                name: (r.clients as { name: string } | null)?.name ?? "acordo",
+                               paid,
                              })
                            }
                          >
@@ -1879,10 +1891,14 @@ function AcordosPage() {
                   Somem juntos: o acordo, <strong>todas as parcelas</strong>, os recebimentos
                   estornados e os <strong>repasses</strong> ligados a ele.
                 </p>
-                <p>
-                  Se houver recebimento válido ou repasse já pago, a exclusão é recusada — estorne
-                  ou cancele antes, senão o caixa e o saldo do banco mudariam sozinhos.
-                </p>
+                {(deleteTarget?.paid ?? 0) > 0.01 && (
+                  <p className="rounded-md border border-destructive/40 bg-destructive/5 p-2 font-medium text-destructive">
+                    Atenção: este acordo já recebeu{" "}
+                    <span className="num">{money(deleteTarget?.paid ?? 0)}</span>. Esse dinheiro
+                    sai do Fluxo de Caixa junto, e o saldo das contas muda na hora — inclusive de
+                    meses já fechados.
+                  </p>
+                )}
                 <p>
                   Não dá para desfazer. Fica o registro completo na auditoria, com todos os
                   valores.

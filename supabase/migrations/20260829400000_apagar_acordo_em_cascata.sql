@@ -28,15 +28,14 @@ SET allowed = false, updated_at = now()
 WHERE module = 'acordos' AND action = 'delete' AND role_code <> 'admin' AND allowed;
 
 -- ============================================================
--- 2) Apagar o acordo inteiro.
+-- 2) Apagar o acordo inteiro, inclusive o que já recebeu dinheiro.
 --
---    A trava: dinheiro que já entrou ou saiu não some por aqui. Apagar um
---    acordo com recebimento válido apagaria também o lançamento espelhado no
---    caixa, e o saldo do banco de um mês fechado mudaria sozinho. Nesses
---    casos o caminho é estornar o recebimento antes — aí o acordo fica limpo
---    e pode ser apagado.
---
---    O que foi apagado fica inteiro no log de auditoria.
+--    Não há trava por valor: o Administrador apaga qualquer acordo e tudo o
+--    que deriva dele. Ao apagar recebimentos e repasses, os gatilhos
+--    (receipts_sync_tx e transfers_sync_tx) removem sozinhos os lançamentos
+--    espelhados — então o Fluxo de Caixa e o saldo das contas se ajustam na
+--    hora, inclusive em meses já fechados. A tela avisa o valor exato antes
+--    de confirmar, e o que foi apagado fica inteiro no log de auditoria.
 -- ============================================================
 CREATE OR REPLACE FUNCTION public.delete_receivable(_id uuid)
 RETURNS jsonb LANGUAGE plpgsql SET search_path = public AS $fn$
@@ -44,7 +43,7 @@ DECLARE
   _org uuid := public.current_org_id();
   _old public.legal_receivables%ROWTYPE;
   _recebido numeric;
-  _repasses_pagos integer;
+  _repassado numeric;
   _n_parcelas integer;
   _n_recebimentos integer;
   _n_repasses integer;
@@ -62,18 +61,14 @@ BEGIN
     RAISE EXCEPTION 'Acordo não encontrado.';
   END IF;
 
-  -- Recebimento válido (não estornado) impede a exclusão.
+  -- Quanto de dinheiro real sai do caixa junto — vai para o log e para a
+  -- resposta, para a tela poder dizer exatamente o que aconteceu.
   SELECT COALESCE(sum(rp.total_amount), 0) INTO _recebido
   FROM public.receipts rp
   JOIN public.installments i ON i.id = rp.installment_id
   WHERE i.receivable_id = _id AND rp.reversed_at IS NULL;
 
-  IF _recebido > 0.01 THEN
-    RAISE EXCEPTION 'Este acordo já recebeu %. Estorne os recebimentos antes de apagar — senão o caixa e o saldo do banco mudariam sozinhos.', _recebido;
-  END IF;
-
-  -- Repasse já pago também é dinheiro que saiu de verdade.
-  SELECT count(*) INTO _repasses_pagos
+  SELECT COALESCE(sum(t.amount), 0) INTO _repassado
   FROM public.client_transfers t
   WHERE t.organization_id = _org
     AND t.status = 'pago'
@@ -86,11 +81,6 @@ BEGIN
       )
     );
 
-  IF _repasses_pagos > 0 THEN
-    RAISE EXCEPTION 'Existem % repasse(s) já pago(s) ligados a este acordo. Cancele-os antes de apagar.', _repasses_pagos;
-  END IF;
-
-  -- Fotografia do que vai sumir, para o log de auditoria.
   SELECT
     (SELECT count(*) FROM public.installments WHERE receivable_id = _id),
     (SELECT count(*) FROM public.receipts rp
@@ -105,8 +95,11 @@ BEGIN
             WHERE i.receivable_id = _id)))
     INTO _n_parcelas, _n_recebimentos, _n_repasses;
 
+  -- Fotografia completa: nada some do registro, mesmo sumindo do sistema.
   _snapshot := jsonb_build_object(
     'acordo', to_jsonb(_old),
+    'recebido_estornado_do_caixa', _recebido,
+    'repassado_estornado_do_caixa', _repassado,
     'parcelas', (SELECT coalesce(jsonb_agg(to_jsonb(i)), '[]'::jsonb)
                  FROM public.installments i WHERE i.receivable_id = _id),
     'recebimentos', (SELECT coalesce(jsonb_agg(to_jsonb(rp)), '[]'::jsonb)
@@ -123,8 +116,7 @@ BEGIN
                        WHERE i.receivable_id = _id)))
   );
 
-  -- Do filho para o pai. Os gatilhos limpam sozinhos os lançamentos
-  -- espelhados no caixa quando o recebimento e o repasse são apagados.
+  -- Do filho para o pai.
   DELETE FROM public.client_transfers t
   WHERE t.organization_id = _org
     AND (
@@ -140,6 +132,13 @@ BEGIN
   WHERE installment_id IN (SELECT id FROM public.installments WHERE receivable_id = _id);
 
   DELETE FROM public.installments WHERE receivable_id = _id;
+
+  -- Sobra alguma coisa apontando para o acordo direto no caixa? Solta o
+  -- vínculo em vez de apagar: pode ser lançamento manual do escritório.
+  UPDATE public.financial_transactions
+  SET source_id = NULL, source_type = NULL
+  WHERE organization_id = _org AND source_type = 'receivable' AND source_id = _id;
+
   DELETE FROM public.legal_receivables WHERE id = _id;
 
   SELECT email INTO _user_email FROM public.profiles WHERE id = auth.uid();
@@ -152,7 +151,9 @@ BEGIN
   RETURN jsonb_build_object(
     'parcelas', _n_parcelas,
     'recebimentos', _n_recebimentos,
-    'repasses', _n_repasses
+    'repasses', _n_repasses,
+    'recebido', _recebido,
+    'repassado', _repassado
   );
 END;
 $fn$;
