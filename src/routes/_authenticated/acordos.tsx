@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag, ReceivableStatusTag } from "@/components/StatusBadge";
@@ -416,8 +416,11 @@ function AcordosPage() {
     flow: "escritorio_recebe_total",
     is_estimated: false,
   });
-  // Cronograma do acordo pronto, editável junto com os dados dele.
-  const [editSchedule, setEditSchedule] = useState<EditParcela[]>([]);
+  // O que já foi digitado por cima das parcelas, por id. As linhas em si vêm
+  // sempre do banco: guardar uma cópia delas em estado fazia a tabela nascer
+  // vazia ao reabrir o mesmo acordo, porque o cache devolve o mesmo objeto e o
+  // efeito que preenchia a cópia não rodava de novo.
+  const [parcelaEdits, setParcelaEdits] = useState<Record<string, Partial<EditParcela>>>({});
   // Parcela já recebida é histórico: só se mexe nela com autorização expressa,
   // e o motivo fica registrado na auditoria.
   const [allowPaidEdit, setAllowPaidEdit] = useState(false);
@@ -980,13 +983,11 @@ function AcordosPage() {
     },
   });
 
-  // Carrega o cronograma no formulário assim que ele chega, e a cada recarga
-  // depois de salvar — o que estiver digitado e não salvo é substituído pelo
-  // que o banco tem, que é o que vale.
-  useEffect(() => {
-    if (!parcelasDoAcordo) return;
-    setEditSchedule(
-      parcelasDoAcordo.map((p) => ({
+  // A linha da tabela é o que está no banco com o que a pessoa digitou por
+  // cima. Nada de cópia: assim reabrir o acordo sempre mostra as parcelas.
+  const editSchedule = useMemo<EditParcela[]>(
+    () =>
+      (parcelasDoAcordo ?? []).map((p) => ({
         id: p.id,
         label: p.label ?? "",
         due_date: p.due_date ?? "",
@@ -1000,9 +1001,10 @@ function AcordosPage() {
         stream: p.stream,
         paid: num(p.paid_total),
         canceled: !!p.canceled_at,
+        ...(parcelaEdits[p.id] ?? {}),
       })),
-    );
-  }, [parcelasDoAcordo]);
+    [parcelasDoAcordo, parcelaEdits],
+  );
 
   const temParcelaPaga = editSchedule.some((p) => p.paid > 0.01);
 
@@ -1021,30 +1023,32 @@ function AcordosPage() {
    * cliente, o total é que sobe ou desce.
    */
   function updateParcela(id: string, patch: Partial<EditParcela>) {
-    setEditSchedule((current) =>
-      current.map((p) => {
-        if (p.id !== id) return p;
-        const atualizada = { ...p, ...patch };
-        const firm = num(Number(atualizada.firm_amount));
-        const client = num(Number(atualizada.client_amount));
-        const costs = num(Number(atualizada.cost_reimbursement));
-        if ("client_amount" in patch) {
-          return { ...atualizada, gross_amount: String(round2(firm + client + costs)) };
-        }
-        if (
-          "gross_amount" in patch ||
-          "firm_amount" in patch ||
-          "cost_reimbursement" in patch
-        ) {
-          const total = num(Number(atualizada.gross_amount));
-          return {
-            ...atualizada,
-            client_amount: String(Math.max(round2(total - firm - costs), 0)),
-          };
-        }
-        return atualizada;
-      }),
-    );
+    const atual = editSchedule.find((p) => p.id === id);
+    if (!atual) return;
+    const atualizada = { ...atual, ...patch };
+    const firm = num(Number(atualizada.firm_amount));
+    const client = num(Number(atualizada.client_amount));
+    const costs = num(Number(atualizada.cost_reimbursement));
+
+    let completo = patch;
+    if ("client_amount" in patch) {
+      completo = { ...patch, gross_amount: String(round2(firm + client + costs)) };
+    } else if (
+      "gross_amount" in patch ||
+      "firm_amount" in patch ||
+      "cost_reimbursement" in patch
+    ) {
+      const total = num(Number(atualizada.gross_amount));
+      completo = {
+        ...patch,
+        client_amount: String(Math.max(round2(total - firm - costs), 0)),
+      };
+    }
+
+    setParcelaEdits((current) => ({
+      ...current,
+      [id]: { ...(current[id] ?? {}), ...completo },
+    }));
   }
 
   /** Soma do cronograma, para conferir com o que o acordo espera receber. */
@@ -1144,16 +1148,19 @@ function AcordosPage() {
 
       for (const parcela of alteradas) {
         const partes = dividirParteDoEscritorio(parcela);
-        const { error: parcelaError } = await supabase.rpc("update_installment", {
-          _id: parcela.id,
-          _label: parcela.label.trim() || undefined,
-          _due_date: parcela.due_date || undefined,
-          _gross_amount: num(Number(parcela.gross_amount)),
-          _fee_amount: partes.fee_amount,
-          _success_fee_amount: partes.success_fee_amount,
-          _client_amount: num(Number(parcela.client_amount)),
-          _cost_reimbursement: num(Number(parcela.cost_reimbursement)),
-        });
+        const { error: parcelaError } = await supabase.rpc(
+          "update_installment",
+          dropUndefined({
+            _id: parcela.id,
+            _label: parcela.label.trim() || undefined,
+            _due_date: parcela.due_date || undefined,
+            _gross_amount: num(Number(parcela.gross_amount)),
+            _fee_amount: partes.fee_amount,
+            _success_fee_amount: partes.success_fee_amount,
+            _client_amount: num(Number(parcela.client_amount)),
+            _cost_reimbursement: num(Number(parcela.cost_reimbursement)),
+          }),
+        );
         if (parcelaError)
           throw new Error(
             `${parcela.label || `Parcela ${parcela.numero ?? ""}`}: ${friendlyError(parcelaError)}`,
@@ -1186,6 +1193,7 @@ function AcordosPage() {
           : "Acordo atualizado.",
       );
       setEditTarget(null);
+      setParcelaEdits({});
       setAllowPaidEdit(false);
       setPaidEditReason("");
       void qc.invalidateQueries();
@@ -2204,6 +2212,11 @@ function AcordosPage() {
                           size="sm"
                           variant="ghost"
                           onClick={() => {
+                            // Abre limpo: o que foi digitado num acordo antes
+                            // não pode vazar para este.
+                            setParcelaEdits({});
+                            setAllowPaidEdit(false);
+                            setPaidEditReason("");
                             setEditTarget({
                               id: r.id,
                               name: (r.clients as { name: string } | null)?.name ?? "acordo",
@@ -2284,7 +2297,7 @@ function AcordosPage() {
         onOpenChange={(v) => {
           if (!v) {
             setEditTarget(null);
-            setEditSchedule([]);
+            setParcelaEdits({});
             setAllowPaidEdit(false);
             setPaidEditReason("");
           }
@@ -2701,7 +2714,15 @@ function AcordosPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditTarget(null)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setEditTarget(null);
+                setParcelaEdits({});
+                setAllowPaidEdit(false);
+                setPaidEditReason("");
+              }}
+            >
               Cancelar
             </Button>
             <Button
