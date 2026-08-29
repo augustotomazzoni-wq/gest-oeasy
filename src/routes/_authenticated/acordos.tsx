@@ -258,18 +258,50 @@ function allocateByCapacity(
   });
 }
 
-function splitFirmComponents(rows: ScheduleRow[], feeTotal: number, successTotal: number) {
-  let feeRemaining = cents(feeTotal);
+function splitFirmComponents(rows: ScheduleRow[], successTotal: number) {
+  const firmCents = rows.map((row) => cents(row.firm_amount));
+  const feeCents = rows.map(() => 0);
+  const successCents = rows.map(() => 0);
   let successRemaining = cents(successTotal);
 
-  return rows.map((row) => {
-    const rowFirm = cents(row.firm_amount);
+  // Quem paga a sucumbência é a parte contrária, então ela preenche primeiro
+  // as parcelas que a parte contrária paga: a trilha da sucumbência e depois a
+  // do honorário que a empresa deposita direto. Sem isso, um acordo em que a
+  // empresa paga justamente o valor da sucumbência gravava a parcela dela como
+  // honorário contratual e jogava a sucumbência na conta da cliente.
+  for (const stream of ["sucumbencia", "empresa"] as const) {
+    rows.forEach((row, index) => {
+      if (row.stream !== stream) return;
+      const rowFirm = firmCents[index] ?? 0;
+      const success = Math.min(rowFirm, successRemaining);
+      successRemaining -= success;
+      successCents[index] = success;
+      feeCents[index] = rowFirm - success;
+    });
+  }
+
+  // Nas parcelas da cliente o honorário contratual continua vindo primeiro, e
+  // a sucumbência que sobrou encosta nas últimas — como sempre foi.
+  const principalFirm = rows.reduce(
+    (total, row, index) => (row.stream === "principal" ? total + (firmCents[index] ?? 0) : total),
+    0,
+  );
+  let feeRemaining = Math.max(principalFirm - successRemaining, 0);
+  rows.forEach((row, index) => {
+    if (row.stream !== "principal") return;
+    const rowFirm = firmCents[index] ?? 0;
     const fee = Math.min(rowFirm, feeRemaining);
     feeRemaining -= fee;
     const success = Math.min(rowFirm - fee, successRemaining);
     successRemaining -= success;
-    return { fee_amount: fromCents(fee), success_fee_amount: fromCents(success) };
+    feeCents[index] = fee;
+    successCents[index] = success;
   });
+
+  return rows.map((_, index) => ({
+    fee_amount: fromCents(feeCents[index] ?? 0),
+    success_fee_amount: fromCents(successCents[index] ?? 0),
+  }));
 }
 
 const EMPTY = {
@@ -568,7 +600,9 @@ function AcordosPage() {
       count: Number(form.firm_direct_parcels),
       firstDue: form.firm_direct_first_due,
       periodicity: Number(form.firm_direct_periodicity),
-      label: "Honorário da empresa",
+      // Rótulo neutro de propósito: dependendo da sucumbência, essa parcela
+      // pode ser gravada como honorário contratual ou como sucumbência.
+      label: "Empresa",
       stream: "empresa",
       startNumber: principal.length + 1,
     });
@@ -663,9 +697,14 @@ function AcordosPage() {
         `A coluna Reembolso soma ${money(scheduleTotals.costs)} e o esperado é ${money(costs)} — ` +
           `${faltaOuSobra(scheduleTotals.costs, costs)}.`,
       );
-    // Com a cliente recebendo direto, o cronograma vale menos que o acordo de
-    // propósito — a conferência com o valor bruto não se aplica.
-    if (!clienteRecebeDireto && gross > 0 && Math.abs(expectedTotal - expectedGrossTotal) > tolTotal)
+    // Quando a parte da cliente não passa pelo escritório — ela recebendo
+    // direto ou o recebimento sendo dividido — o cronograma vale menos que o
+    // acordo de propósito, e a conferência com o valor bruto não se aplica.
+    if (
+      !parteDaClienteForaDoCronograma &&
+      gross > 0 &&
+      Math.abs(expectedTotal - expectedGrossTotal) > tolTotal
+    )
       errors.push(
         `O total distribuído (${money(expectedTotal)}) não fecha com o valor bruto` +
           `${successInsideGross ? "" : " + sucumbência"}` +
@@ -676,7 +715,7 @@ function AcordosPage() {
     return [...new Set(errors)];
   }, [
     clientNoCronograma,
-    clienteRecebeDireto,
+    parteDaClienteForaDoCronograma,
     costs,
     feeBaseExtra,
     firm,
@@ -817,25 +856,7 @@ function AcordosPage() {
         .reduce((total, row) => round2(total + row.firm_amount), 0);
 
       const successForSchedule = Math.min(successFee, firmGravado);
-      const feeForSchedule = Math.max(firmGravado - successForSchedule, 0);
-      // As parcelas de fora da trilha da cliente já nascem puras: a da empresa
-      // é toda honorário contratual, a da sucumbência é toda sucumbência. O
-      // que sobra é rateado proporcionalmente entre as parcelas da cliente,
-      // como já era antes.
-      const principalRows = gravar.filter((row) => row.stream === "principal");
-      const principalComponents = splitFirmComponents(
-        principalRows,
-        Math.max(feeForSchedule - firmDirectGravado, 0),
-        successSeparated ? 0 : successForSchedule,
-      );
-      let principalIndex = 0;
-      const firmComponents = gravar.map((row) => {
-        if (row.stream === "sucumbencia")
-          return { fee_amount: 0, success_fee_amount: row.firm_amount };
-        if (row.stream === "empresa")
-          return { fee_amount: row.firm_amount, success_fee_amount: 0 };
-        return principalComponents[principalIndex++] ?? { fee_amount: 0, success_fee_amount: 0 };
-      });
+      const firmComponents = splitFirmComponents(gravar, successForSchedule);
 
       // Acordo e cronograma são gravados em uma única transação no banco:
       // se a criação das parcelas falhar, o acordo também não é criado —

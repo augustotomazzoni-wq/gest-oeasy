@@ -570,9 +570,7 @@ function ParcelasPage() {
                     <span className="block text-xs text-info">sucumbência — paga direto</span>
                   )}
                   {r.stream === "empresa" && (
-                    <span className="block text-xs text-info">
-                      honorário — a empresa paga direto
-                    </span>
+                    <span className="block text-xs text-info">a empresa paga direto</span>
                   )}
                 </td>
                 <td>
