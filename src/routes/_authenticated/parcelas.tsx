@@ -569,6 +569,11 @@ function ParcelasPage() {
                   {r.stream === "sucumbencia" && (
                     <span className="block text-xs text-info">sucumbência — paga direto</span>
                   )}
+                  {r.stream === "empresa" && (
+                    <span className="block text-xs text-info">
+                      honorário — a empresa paga direto
+                    </span>
+                  )}
                 </td>
                 <td>
                   <span className="font-medium">{r.label || `Parcela ${r.number ?? "—"}`}</span>

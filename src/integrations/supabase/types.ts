@@ -894,6 +894,7 @@ export type Database = {
           fee_base_extra_amount: number
           fee_fixed_amount: number | null
           fee_percent: number | null
+          firm_direct_amount: number
           flow: Database["public"]["Enums"]["flow_type"]
           gross_amount: number
           id: string
@@ -922,6 +923,7 @@ export type Database = {
           fee_base_extra_amount?: number
           fee_fixed_amount?: number | null
           fee_percent?: number | null
+          firm_direct_amount?: number
           flow?: Database["public"]["Enums"]["flow_type"]
           gross_amount?: number
           id?: string
@@ -950,6 +952,7 @@ export type Database = {
           fee_base_extra_amount?: number
           fee_fixed_amount?: number | null
           fee_percent?: number | null
+          firm_direct_amount?: number
           flow?: Database["public"]["Enums"]["flow_type"]
           gross_amount?: number
           id?: string
@@ -1504,6 +1507,7 @@ export type Database = {
           _fee_base_extra_amount?: number
           _fee_fixed_amount?: number
           _fee_percent?: number
+          _firm_direct_amount?: number
           _flow?: string
           _gross_amount?: number
           _installments?: Json
@@ -1632,6 +1636,7 @@ export type Database = {
           _fee_base_extra_amount?: number
           _fee_fixed_amount?: number
           _fee_percent?: number
+          _firm_direct_amount?: number
           _flow?: string
           _gross_amount?: number
           _id: string

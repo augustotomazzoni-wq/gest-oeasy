@@ -71,8 +71,13 @@ type DistributionMode =
 type ScheduleRow = {
   label: string;
   number: number;
-  /** De onde vem a parcela: o acordo em si ou a sucumbência paga direto. */
-  stream: "principal" | "sucumbencia";
+  /**
+   * Quem paga a parcela:
+   * - `principal`   a cliente
+   * - `empresa`     honorário que a parte contrária deposita direto aqui
+   * - `sucumbencia` sucumbência, também paga pela parte contrária
+   */
+  stream: "principal" | "empresa" | "sucumbencia";
   due_date: string;
   gross_amount: number;
   firm_amount: number;
@@ -125,6 +130,46 @@ function ajustarCentavos(rows: ScheduleRow[]): ScheduleRow[] {
 }
 
 const round2 = (value: number) => Math.round(num(value) * 100) / 100;
+
+/**
+ * Bloco de parcelas que é inteiro do escritório, com datas próprias.
+ *
+ * Serve para os dois casos em que quem paga não é a cliente: a sucumbência e o
+ * honorário que a empresa deposita direto na nossa conta. Divide o valor em
+ * parcelas iguais e encosta o resto dos centavos na última.
+ */
+function parcelasDoEscritorio(opts: {
+  total: number;
+  count: number;
+  firstDue: string;
+  periodicity: number;
+  label: string;
+  stream: ScheduleRow["stream"];
+  startNumber: number;
+}): ScheduleRow[] {
+  const totalCents = cents(opts.total);
+  if (totalCents <= 0) return [];
+  const count = Math.max(1, Math.floor(num(opts.count)));
+  const period = Math.max(1, Math.floor(num(opts.periodicity)));
+  const base = Math.floor(totalCents / count);
+  const rows: ScheduleRow[] = [];
+  let allocated = 0;
+  for (let index = 0; index < count; index += 1) {
+    const value = index === count - 1 ? totalCents - allocated : base;
+    allocated += value;
+    rows.push({
+      label: count > 1 ? `${opts.label} ${index + 1}` : opts.label,
+      number: opts.startNumber + index,
+      stream: opts.stream,
+      due_date: addMonthsISO(opts.firstDue, index * period),
+      gross_amount: fromCents(value),
+      firm_amount: fromCents(value),
+      client_amount: 0,
+      cost_reimbursement: 0,
+    });
+  }
+  return rows;
+}
 
 /** "faltam R$ 0,02" / "sobram R$ 0,05" — o que o usuário precisa saber. */
 function faltaOuSobra(atual: number, alvo: number): string {
@@ -257,6 +302,12 @@ const EMPTY = {
   success_parcels: "1",
   success_first_due: todayISO(),
   success_periodicity: "1",
+  // Recebimento dividido: quanto do honorário a empresa deposita direto na
+  // conta do escritório. O resto o cronograma cobra da cliente.
+  firm_direct_amount: "",
+  firm_direct_parcels: "1",
+  firm_direct_first_due: todayISO(),
+  firm_direct_periodicity: "1",
   has_entry: false,
   entry_amount: "",
   entry_due: todayISO(),
@@ -290,6 +341,7 @@ function AcordosPage() {
     fee_percent: "",
     fee_fixed_amount: "",
     fee_base_extra_amount: "",
+    firm_direct_amount: "",
     flow: "escritorio_recebe_total",
     is_estimated: false,
   });
@@ -324,6 +376,11 @@ function AcordosPage() {
     "success_parcels",
     "success_first_due",
     "success_periodicity",
+    "flow",
+    "firm_direct_amount",
+    "firm_direct_parcels",
+    "firm_direct_first_due",
+    "firm_direct_periodicity",
   ] as const;
 
   function updateForm(patch: Partial<typeof EMPTY>) {
@@ -432,7 +489,12 @@ function AcordosPage() {
   // vai repassar para nós. Antes o cronograma cobrava o valor cheio do acordo,
   // e a lista de parcelas ficava com um valor que ninguém nunca ia receber.
   const clienteRecebeDireto = form.flow === "cliente_recebe_direto";
-  const clientNoCronograma = clienteRecebeDireto ? 0 : client;
+  // Recebimento dividido: a empresa deposita parte do honorário direto aqui e
+  // manda o resto do acordo para a conta da cliente. O dinheiro dela também
+  // não passa por nós — ela só nos paga o honorário que faltou.
+  const recebimentoDividido = form.flow === "recebimento_dividido";
+  const parteDaClienteForaDoCronograma = clienteRecebeDireto || recebimentoDividido;
+  const clientNoCronograma = parteDaClienteForaDoCronograma ? 0 : client;
 
   // Sucumbência com datas próprias só faz sentido quando existe sucumbência e
   // ela não está embutida no valor do acordo.
@@ -440,11 +502,20 @@ function AcordosPage() {
   // Com as trilhas separadas, o cronograma do acordo carrega só honorários
   // contratuais + parte da cliente; a sucumbência vira um bloco à parte.
   const mainFirm = successSeparated ? Math.max(firm - successFee, 0) : firm;
+  // O que a empresa paga direto sai de dentro do honorário — não é dinheiro a
+  // mais. Trava no teto para um valor digitado errado não gerar cronograma
+  // negativo enquanto a pessoa ainda está digitando.
+  const firmDirect = recebimentoDividido
+    ? Math.min(num(Number(form.firm_direct_amount)), mainFirm)
+    : 0;
+  // Sobra para a trilha da cliente.
+  const firmNoPrincipal = round2(mainFirm - firmDirect);
 
   const generatedSchedule = useMemo<ScheduleRow[]>(() => {
     if (form.no_schedule) return [];
-    const scheduleTotalCents = cents(mainFirm + clientNoCronograma + costs);
-    if (scheduleTotalCents <= 0) return [];
+    // Trilha da cliente: o honorário que sobrou depois do que a empresa paga
+    // direto, mais a parte dela que passa pela nossa conta.
+    const scheduleTotalCents = cents(firmNoPrincipal + clientNoCronograma + costs);
 
     const entryRequested = form.has_entry ? cents(Number(form.entry_amount)) : 0;
     const entryCents = Math.min(entryRequested, scheduleTotalCents);
@@ -473,11 +544,14 @@ function AcordosPage() {
       }
     }
 
-    const allocations = allocateByCapacity(
-      capacities,
-      { firm: mainFirm, client: clientNoCronograma, costs },
-      form.distribution_mode,
-    );
+    const allocations =
+      scheduleTotalCents > 0
+        ? allocateByCapacity(
+            capacities,
+            { firm: firmNoPrincipal, client: clientNoCronograma, costs },
+            form.distribution_mode,
+          )
+        : [];
 
     const principal: ScheduleRow[] = allocations.map((allocation, index) => ({
       ...allocation,
@@ -487,32 +561,32 @@ function AcordosPage() {
       due_date: dueDates[index] ?? form.first_due,
     }));
 
-    if (!successSeparated) return principal;
+    // Blocos de quem não é a cliente. Cada um tem valor e datas próprios, e é
+    // inteiro do escritório.
+    const empresa = parcelasDoEscritorio({
+      total: firmDirect,
+      count: Number(form.firm_direct_parcels),
+      firstDue: form.firm_direct_first_due,
+      periodicity: Number(form.firm_direct_periodicity),
+      label: "Honorário da empresa",
+      stream: "empresa",
+      startNumber: principal.length + 1,
+    });
 
-    // Bloco da sucumbência: valor inteiro do escritório, nas datas dela.
-    const successCents = cents(successFee);
-    const successCount = Math.max(1, Math.floor(num(Number(form.success_parcels))));
-    const successPeriod = Math.max(1, Math.floor(num(Number(form.success_periodicity))));
-    const base = Math.floor(successCents / successCount);
-    let allocated = 0;
-    const sucumbencia: ScheduleRow[] = [];
-    for (let index = 0; index < successCount; index += 1) {
-      const value = index === successCount - 1 ? successCents - allocated : base;
-      allocated += value;
-      sucumbencia.push({
-        label: successCount > 1 ? `Sucumbência ${index + 1}` : "Sucumbência",
-        number: principal.length + index + 1,
-        stream: "sucumbencia",
-        due_date: addMonthsISO(form.success_first_due, index * successPeriod),
-        gross_amount: fromCents(value),
-        firm_amount: fromCents(value),
-        client_amount: 0,
-        cost_reimbursement: 0,
-      });
-    }
+    const sucumbencia = successSeparated
+      ? parcelasDoEscritorio({
+          total: successFee,
+          count: Number(form.success_parcels),
+          firstDue: form.success_first_due,
+          periodicity: Number(form.success_periodicity),
+          label: "Sucumbência",
+          stream: "sucumbencia",
+          startNumber: principal.length + empresa.length + 1,
+        })
+      : [];
 
-    return [...principal, ...sucumbencia];
-  }, [form, mainFirm, clientNoCronograma, costs, successSeparated, successFee]);
+    return [...principal, ...empresa, ...sucumbencia];
+  }, [form, firmDirect, firmNoPrincipal, clientNoCronograma, costs, successSeparated, successFee]);
 
   const schedule = editedSchedule ?? generatedSchedule;
 
@@ -548,6 +622,11 @@ function AcordosPage() {
     if (form.has_entry && entry <= 0) errors.push("Informe um valor de entrada maior que zero.");
     if (form.has_entry && entry - expectedTotal > 0.01)
       errors.push("A entrada não pode ser maior que o total a receber.");
+    if (recebimentoDividido && num(Number(form.firm_direct_amount)) - mainFirm > 0.01)
+      errors.push(
+        `A empresa não pode pagar direto mais do que o escritório tem a receber ` +
+          `(${money(mainFirm)}) — o que passar disso não sai de lugar nenhum.`,
+      );
     if (!schedule.length) errors.push("Crie ao menos uma parcela para o cronograma.");
 
     const tolTotal = toleranciaTotal(schedule.length);
@@ -602,8 +681,11 @@ function AcordosPage() {
     feeBaseExtra,
     firm,
     gross,
+    mainFirm,
+    recebimentoDividido,
     expectedGrossTotal,
     successInsideGross,
+    form.firm_direct_amount,
     form.entry_amount,
     form.has_entry,
     form.no_schedule,
@@ -629,8 +711,9 @@ function AcordosPage() {
       "cost_reimbursement" in patch;
     if (!mexeuEmDinheiro) return atualizada;
 
-    // Sucumbência é paga direto ao escritório: não há o que repartir.
-    const semParteDaCliente = row.stream === "sucumbencia" || clientNoCronograma <= 0.01;
+    // Sucumbência e honorário pago pela empresa vão direto para o escritório:
+    // não há o que repartir com a cliente.
+    const semParteDaCliente = row.stream !== "principal" || clientNoCronograma <= 0.01;
     const sobra = (menos: number) => Math.max(round2(atualizada.gross_amount - menos), 0);
 
     if (semParteDaCliente) {
@@ -720,26 +803,39 @@ function AcordosPage() {
       // Sem cronograma não há o que conferir: valem os valores digitados.
       const firmGravado = gravar.length ? totalGravado.firm : firm;
       const clientGravado = gravar.length
-        ? clienteRecebeDireto
+        ? parteDaClienteForaDoCronograma
           ? client
           : totalGravado.client
         : client;
       const costsGravado = gravar.length ? totalGravado.costs : costs;
 
+      // Quanto a empresa paga direto, medido no próprio cronograma — assim o
+      // que fica gravado no acordo bate com as parcelas mesmo que alguém tenha
+      // mexido nelas à mão.
+      const firmDirectGravado = gravar
+        .filter((row) => row.stream === "empresa")
+        .reduce((total, row) => round2(total + row.firm_amount), 0);
+
       const successForSchedule = Math.min(successFee, firmGravado);
       const feeForSchedule = Math.max(firmGravado - successForSchedule, 0);
-      // Com as trilhas separadas cada parcela já nasce pura: a do acordo é
-      // toda honorário contratual, a da sucumbência é toda sucumbência.
-      // Sem separação, mantém o rateio proporcional de antes.
-      const firmComponents = !gravar.length
-        ? []
-        : successSeparated
-          ? gravar.map((row) =>
-              row.stream === "sucumbencia"
-                ? { fee_amount: 0, success_fee_amount: row.firm_amount }
-                : { fee_amount: row.firm_amount, success_fee_amount: 0 },
-            )
-          : splitFirmComponents(gravar, feeForSchedule, successForSchedule);
+      // As parcelas de fora da trilha da cliente já nascem puras: a da empresa
+      // é toda honorário contratual, a da sucumbência é toda sucumbência. O
+      // que sobra é rateado proporcionalmente entre as parcelas da cliente,
+      // como já era antes.
+      const principalRows = gravar.filter((row) => row.stream === "principal");
+      const principalComponents = splitFirmComponents(
+        principalRows,
+        Math.max(feeForSchedule - firmDirectGravado, 0),
+        successSeparated ? 0 : successForSchedule,
+      );
+      let principalIndex = 0;
+      const firmComponents = gravar.map((row) => {
+        if (row.stream === "sucumbencia")
+          return { fee_amount: 0, success_fee_amount: row.firm_amount };
+        if (row.stream === "empresa")
+          return { fee_amount: row.firm_amount, success_fee_amount: 0 };
+        return principalComponents[principalIndex++] ?? { fee_amount: 0, success_fee_amount: 0 };
+      });
 
       // Acordo e cronograma são gravados em uma única transação no banco:
       // se a criação das parcelas falhar, o acordo também não é criado —
@@ -757,6 +853,7 @@ function AcordosPage() {
         _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
         _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
         _fee_base_extra_amount: feeBaseExtra,
+        _firm_direct_amount: firmDirectGravado,
         _success_fee_amount: successFee,
         _cost_reimbursement: costsGravado,
         _expected_firm_amount: firmGravado,
@@ -819,6 +916,7 @@ function AcordosPage() {
             ? num(Number(editForm.fee_fixed_amount))
             : undefined,
           _fee_base_extra_amount: num(Number(editForm.fee_base_extra_amount)),
+          _firm_direct_amount: num(Number(editForm.firm_direct_amount)),
           _flow: editForm.flow || undefined,
           _is_estimated: editForm.is_estimated,
         }),
@@ -1163,10 +1261,14 @@ function AcordosPage() {
                           escritório — o dinheiro dela não passa por aqui.
                         </p>
                       )}
-                      <Select
-                        value={form.flow}
-                        onValueChange={(v) => setForm({ ...form, flow: v })}
-                      >
+                      {recebimentoDividido && (
+                        <p className="order-last text-xs text-info">
+                          No passo seguinte você informa quanto do honorário a empresa paga direto
+                          ao escritório. O resto do acordo cai na conta da cliente, e ela paga o
+                          honorário que faltar.
+                        </p>
+                      )}
+                      <Select value={form.flow} onValueChange={(v) => updateForm({ flow: v })}>
                         <SelectTrigger>
                           <SelectValue />
                         </SelectTrigger>
@@ -1359,6 +1461,84 @@ function AcordosPage() {
                                 </>
                               )}
                             </p>
+                          </div>
+                        )}
+
+                        {/* Recebimento dividido: a empresa deposita parte do
+                            honorário direto aqui e manda o resto do acordo
+                            para a conta da cliente, que nos paga o que faltou
+                            do honorário. */}
+                        {recebimentoDividido && !isServiceFee && (
+                          <div className="rounded-md border border-border p-3">
+                            <div className="space-y-2">
+                              <Label htmlFor="fdir">
+                                Do honorário de {money(mainFirm)}, quanto a empresa paga direto ao
+                                escritório?
+                              </Label>
+                              <Input
+                                id="fdir"
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={form.firm_direct_amount}
+                                onChange={(e) => updateForm({ firm_direct_amount: e.target.value })}
+                              />
+                              <p className="text-xs text-muted-foreground">
+                                O resto do acordo cai direto na conta da cliente — não entra no
+                                caixa nem vira repasse. O valor bruto continua inteiro, como
+                                estatística do que se conseguiu para ela.
+                              </p>
+                              {firmDirect > 0 && (
+                                <p className="text-xs text-info">
+                                  Empresa paga{" "}
+                                  <strong className="num">{money(firmDirect)}</strong> e a cliente
+                                  paga <strong className="num">{money(firmNoPrincipal)}</strong> —
+                                  em trilhas separadas, cada uma com suas datas. A cliente recebe{" "}
+                                  <strong className="num">{money(client)}</strong> direto na conta
+                                  dela.
+                                </p>
+                              )}
+                            </div>
+
+                            {firmDirect > 0 && (
+                              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                                <div className="space-y-2">
+                                  <Label htmlFor="fdpar">Parcelas da empresa</Label>
+                                  <Input
+                                    id="fdpar"
+                                    type="number"
+                                    min="1"
+                                    value={form.firm_direct_parcels}
+                                    onChange={(e) =>
+                                      updateForm({ firm_direct_parcels: e.target.value })
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <Label htmlFor="fdfst">1º vencimento</Label>
+                                  <Input
+                                    id="fdfst"
+                                    type="date"
+                                    value={form.firm_direct_first_due}
+                                    onChange={(e) =>
+                                      updateForm({ firm_direct_first_due: e.target.value })
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <Label htmlFor="fdper">Periodicidade (meses)</Label>
+                                  <Input
+                                    id="fdper"
+                                    type="number"
+                                    min="1"
+                                    value={form.firm_direct_periodicity}
+                                    onChange={(e) =>
+                                      updateForm({ firm_direct_periodicity: e.target.value })
+                                    }
+                                  />
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
 
@@ -1569,6 +1749,9 @@ function AcordosPage() {
                                   />
                                   {row.stream === "sucumbencia" && (
                                     <Tag tone="info">paga direto ao escritório</Tag>
+                                  )}
+                                  {row.stream === "empresa" && (
+                                    <Tag tone="info">a empresa paga</Tag>
                                   )}
                                 </td>
                                 <td className="p-2">
@@ -1818,6 +2001,9 @@ function AcordosPage() {
                               fee_base_extra_amount: r.fee_base_extra_amount
                                 ? String(num(r.fee_base_extra_amount))
                                 : "",
+                              firm_direct_amount: r.firm_direct_amount
+                                ? String(num(r.firm_direct_amount))
+                                : "",
                               flow: r.flow ?? "escritorio_recebe_total",
                               is_estimated: !!r.is_estimated,
                             });
@@ -1978,6 +2164,21 @@ function AcordosPage() {
               <p className="text-xs text-muted-foreground">
                 Entra só na base do percentual de honorários. Mudar aqui não recalcula sozinho os
                 valores esperados abaixo — ajuste-os na mão se for o caso.
+              </p>
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="efdir">Honorário que a empresa paga direto ao escritório</Label>
+              <Input
+                id="efdir"
+                type="number"
+                step="0.01"
+                min="0"
+                value={editForm.firm_direct_amount}
+                onChange={(e) => setEditForm({ ...editForm, firm_direct_amount: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                Sai de dentro do esperado do escritório — não é dinheiro a mais. Corrige só o
+                registro do acordo: as parcelas já criadas continuam com a origem que tinham.
               </p>
             </div>
             <div className="space-y-2">
