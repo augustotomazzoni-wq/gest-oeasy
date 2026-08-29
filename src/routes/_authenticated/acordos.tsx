@@ -313,11 +313,10 @@ const EMPTY = {
   gross_amount: "",
   fee_percent: "",
   fee_fixed_amount: "",
-  // Dinheiro que a cliente já recebeu por fora (FGTS liberado na conta
-  // vinculada, alvará sacado direto). Só entra na base do percentual.
+  // Fatia do valor bruto que a cliente já sacou sozinha (FGTS liberado na conta
+  // vinculada, alvará). Abate do que ainda passa pela conta do escritório.
   fee_base_extra_amount: "",
   success_fee_amount: "",
-  success_fee_included: false,
   cost_reimbursement: "",
   expected_firm_amount: "",
   expected_client_amount: "",
@@ -328,9 +327,8 @@ const EMPTY = {
   parcels: "1",
   first_due: todayISO(),
   periodicity: "1",
-  // Sucumbência com cronograma próprio: a parte contrária paga direto ao
-  // escritório, e quase nunca nas mesmas datas do acordo da cliente.
-  success_separate: false,
+  // Sucumbência: sempre com cronograma próprio, porque a parte contrária paga
+  // direto ao escritório e quase nunca nas mesmas datas do acordo da cliente.
   success_parcels: "1",
   success_first_due: todayISO(),
   success_periodicity: "1",
@@ -392,7 +390,6 @@ function AcordosPage() {
     "fee_fixed_amount",
     "fee_base_extra_amount",
     "success_fee_amount",
-    "success_fee_included",
     "cost_reimbursement",
     "expected_firm_amount",
     "expected_client_amount",
@@ -404,7 +401,6 @@ function AcordosPage() {
     "periodicity",
     "distribution_mode",
     "no_schedule",
-    "success_separate",
     "success_parcels",
     "success_first_due",
     "success_periodicity",
@@ -468,18 +464,18 @@ function AcordosPage() {
   // sucumbência e não há repasse. É o oposto do acordo, onde o valor bruto é
   // da cliente e o escritório fica com um percentual.
   const isServiceFee = form.type === "honorarios";
-  // Valor que a cliente recebeu direto — FGTS liberado na conta vinculada,
-  // alvará sacado por ela. O contrato cobra o percentual sobre ele, mas o
-  // dinheiro nunca passa por aqui: fica fora do bruto, do cronograma, do caixa
-  // e do repasse. Só engorda a base do percentual, e o honorário a mais sai da
-  // parte que a cliente receberia do que transita.
-  const feeBaseExtra = isServiceFee ? 0 : num(Number(form.fee_base_extra_amount));
-  const feeBase = gross + feeBaseExtra;
+  // Fatia do valor bruto que a cliente já sacou sozinha — FGTS liberado na
+  // conta vinculada, alvará sacado por ela. Os honorários continuam incidindo
+  // sobre o bruto inteiro; o que este valor faz é abater do que ainda passa
+  // pela conta do escritório, então ele não entra no cronograma, no caixa nem
+  // no repasse.
+  //
+  // No banco a coluna se chama `fee_base_extra_amount`, nome herdado da
+  // primeira versão desta ideia, em que o FGTS somava na base do percentual em
+  // vez de abater do bruto.
+  const recebidoDireto = isServiceFee ? 0 : num(Number(form.fee_base_extra_amount));
   const feePercentValue = form.fee_percent ? num(Number(form.fee_percent)) : 0;
-  const feeFromPercent = form.fee_percent ? (feeBase * feePercentValue) / 100 : 0;
-  // Quanto do honorário vem do valor recebido direto — só para mostrar na
-  // tela; a conta em si já está no feeFromPercent.
-  const feeOverExtra = form.fee_percent ? (feeBaseExtra * feePercentValue) / 100 : 0;
+  const feeFromPercent = form.fee_percent ? (gross * feePercentValue) / 100 : 0;
   const contractualFee = isServiceFee
     ? gross
     : form.fee_percent
@@ -487,26 +483,15 @@ function AcordosPage() {
       : num(Number(form.fee_fixed_amount));
   const successFee = isServiceFee ? 0 : num(Number(form.success_fee_amount));
   const costs = isServiceFee ? 0 : num(Number(form.cost_reimbursement));
-  // A sucumbência é paga pela parte perdedora, então às vezes vem por fora do
-  // valor do acordo e às vezes já está embutida nele. Quem cadastra informa
-  // qual é o caso — antes o sistema sempre assumia "por fora" em silêncio, e o
-  // cronograma somava mais que o valor bruto sem explicar o motivo.
-  const successInsideGross = form.success_fee_included;
+  // A sucumbência é sempre por fora e nunca participa da divisão do acordo: o
+  // valor bruto é da cliente, e o percentual de honorários incide só sobre ele.
+  // Ela entra apenas no total que o escritório tem a receber, com cronograma
+  // próprio.
   const suggestedFirm = contractualFee + successFee;
-  const suggestedClient = Math.max(
-    gross - contractualFee - costs - (successInsideGross ? successFee : 0),
-    0,
-  );
-  // Quanto o cronograma inteiro deve somar. Na conta normal isso dá exatamente
-  // o valor bruto (mais a sucumbência, quando ela vem por fora), porque o
-  // honorário sai de dentro da parte da cliente. Quando o honorário passa do
-  // que transita — acordo pequeno com FGTS grande recebido direto — a cliente
-  // fica devendo a diferença, e o total sobe junto.
+  const suggestedClient = Math.max(gross - contractualFee - costs, 0);
+  // A composição do acordo: o valor bruto se divide entre escritório, cliente e
+  // reembolso, e a sucumbência entra por fora.
   const expectedGrossTotal = round2(suggestedFirm + suggestedClient + costs);
-  // Só o dinheiro que transita — é o que o resumo mostra como "bruto +
-  // sucumbência". Fica separado do total acima porque o honorário sobre o
-  // valor recebido direto pode fazer o total passar do que transita.
-  const grossPlusSuccess = round2(gross + (successInsideGross ? 0 : successFee));
   const firm = form.expected_firm_amount ? num(Number(form.expected_firm_amount)) : suggestedFirm;
   const client = isServiceFee
     ? 0
@@ -526,11 +511,15 @@ function AcordosPage() {
   // não passa por nós — ela só nos paga o honorário que faltou.
   const recebimentoDividido = form.flow === "recebimento_dividido";
   const parteDaClienteForaDoCronograma = clienteRecebeDireto || recebimentoDividido;
-  const clientNoCronograma = parteDaClienteForaDoCronograma ? 0 : client;
+  // O que a cliente já sacou (FGTS, alvará) abate do que ainda passa pela nossa
+  // conta: o cronograma cobra só o que sobrou dela.
+  const clientNoCronograma = parteDaClienteForaDoCronograma
+    ? 0
+    : Math.max(round2(client - recebidoDireto), 0);
 
-  // Sucumbência com datas próprias só faz sentido quando existe sucumbência e
-  // ela não está embutida no valor do acordo.
-  const successSeparated = form.success_separate && successFee > 0.01 && !isServiceFee;
+  // A sucumbência sempre tem cronograma próprio: ela não participa da divisão
+  // do acordo, serve para saber quanto ainda entra e em que datas.
+  const successSeparated = successFee > 0.01 && !isServiceFee;
   // Com as trilhas separadas, o cronograma do acordo carrega só honorários
   // contratuais + parte da cliente; a sucumbência vira um bloco à parte.
   const mainFirm = successSeparated ? Math.max(firm - successFee, 0) : firm;
@@ -651,11 +640,20 @@ function AcordosPage() {
   const scheduleErrors = useMemo(() => {
     if (form.no_schedule) return [];
     const errors: string[] = [];
-    const expectedTotal = firm + clientNoCronograma + costs;
+    // Duas contas diferentes, e confundir as duas já deu erro falso antes: o
+    // cronograma cobra só o que ainda passa pela nossa conta, enquanto a
+    // composição do acordo é o bolo inteiro, passe ele por onde passar.
+    const totalNoCronograma = firm + clientNoCronograma + costs;
+    const composicaoTotal = round2(firm + client + costs);
     const entry = num(Number(form.entry_amount));
     if (form.has_entry && entry <= 0) errors.push("Informe um valor de entrada maior que zero.");
-    if (form.has_entry && entry - expectedTotal > 0.01)
+    if (form.has_entry && entry - totalNoCronograma > 0.01)
       errors.push("A entrada não pode ser maior que o total a receber.");
+    if (recebidoDireto - gross > 0.01)
+      errors.push(
+        `A cliente não pode ter recebido direto mais do que o valor bruto ` +
+          `(${money(gross)}) — o FGTS já está dentro dele.`,
+      );
     if (recebimentoDividido && num(Number(form.firm_direct_amount)) - mainFirm > 0.01)
       errors.push(
         `A empresa não pode pagar direto mais do que o escritório tem a receber ` +
@@ -677,10 +675,11 @@ function AcordosPage() {
         );
     });
 
-    if (Math.abs(scheduleTotals.gross - expectedTotal) > tolTotal)
+    if (Math.abs(scheduleTotals.gross - totalNoCronograma) > tolTotal)
       errors.push(
         `As parcelas somam ${money(scheduleTotals.gross)} e o total a receber é ` +
-          `${money(expectedTotal)} — ${faltaOuSobra(scheduleTotals.gross, expectedTotal)} no cronograma.`,
+          `${money(totalNoCronograma)} — ` +
+          `${faltaOuSobra(scheduleTotals.gross, totalNoCronograma)} no cronograma.`,
       );
     if (Math.abs(scheduleTotals.firm - firm) > tolTotal)
       errors.push(
@@ -697,33 +696,26 @@ function AcordosPage() {
         `A coluna Reembolso soma ${money(scheduleTotals.costs)} e o esperado é ${money(costs)} — ` +
           `${faltaOuSobra(scheduleTotals.costs, costs)}.`,
       );
-    // Quando a parte da cliente não passa pelo escritório — ela recebendo
-    // direto ou o recebimento sendo dividido — o cronograma vale menos que o
-    // acordo de propósito, e a conferência com o valor bruto não se aplica.
-    if (
-      !parteDaClienteForaDoCronograma &&
-      gross > 0 &&
-      Math.abs(expectedTotal - expectedGrossTotal) > tolTotal
-    )
+    // Conferência da composição, não do cronograma: escritório + cliente +
+    // reembolso têm de fechar com o valor bruto + sucumbência, independentemente
+    // de o dinheiro passar ou não pela nossa conta.
+    if (gross > 0 && Math.abs(composicaoTotal - expectedGrossTotal) > tolTotal)
       errors.push(
-        `O total distribuído (${money(expectedTotal)}) não fecha com o valor bruto` +
-          `${successInsideGross ? "" : " + sucumbência"}` +
-          `${feeBaseExtra > 0.01 ? " + honorário sobre o valor recebido direto" : ""}` +
-          ` (${money(expectedGrossTotal)}) — ` +
-          `${faltaOuSobra(expectedTotal, expectedGrossTotal)} na divisão entre escritório e cliente.`,
+        `O total distribuído (${money(composicaoTotal)}) não fecha com o valor bruto + ` +
+          `sucumbência (${money(expectedGrossTotal)}) — ` +
+          `${faltaOuSobra(composicaoTotal, expectedGrossTotal)} na divisão entre escritório e cliente.`,
       );
     return [...new Set(errors)];
   }, [
+    client,
     clientNoCronograma,
-    parteDaClienteForaDoCronograma,
     costs,
-    feeBaseExtra,
     firm,
     gross,
     mainFirm,
+    recebidoDireto,
     recebimentoDividido,
     expectedGrossTotal,
-    successInsideGross,
     form.firm_direct_amount,
     form.entry_amount,
     form.has_entry,
@@ -873,7 +865,7 @@ function AcordosPage() {
         _gross_amount: gross,
         _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
         _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
-        _fee_base_extra_amount: feeBaseExtra,
+        _fee_base_extra_amount: recebidoDireto,
         _firm_direct_amount: firmDirectGravado,
         _success_fee_amount: successFee,
         _cost_reimbursement: costsGravado,
@@ -1110,7 +1102,6 @@ function AcordosPage() {
                                   fee_fixed_amount: "",
                                   fee_base_extra_amount: "",
                                   success_fee_amount: "",
-                                  success_fee_included: false,
                                   cost_reimbursement: "",
                                   expected_client_amount: "",
                                   flow: "escritorio_recebe_total",
@@ -1214,23 +1205,19 @@ function AcordosPage() {
                         onChange={(e) => updateForm({ fee_base_extra_amount: e.target.value })}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Dinheiro que a cliente sacou sozinha e nunca passa pelo escritório. Entra só
-                        na base do percentual de honorários — fica fora do valor bruto, do
-                        cronograma, do caixa e do repasse.
+                        Parte do valor bruto que a cliente sacou sozinha e nunca passa pelo
+                        escritório. Os honorários continuam sendo calculados sobre o valor bruto
+                        inteiro — o que este campo faz é abater do que ainda entra na nossa conta.
                       </p>
-                      {feeBaseExtra > 0 && !form.fee_percent && (
-                        <p className="text-xs text-warning">
-                          Sem % de honorários este valor não muda nada: informe o percentual, ou
-                          cobre o honorário pelo campo de valor fixo.
-                        </p>
-                      )}
-                      {feeBaseExtra > 0 && !!form.fee_percent && (
+                      {recebidoDireto > 0 && (
                         <p className="text-xs text-info">
-                          Base do percentual: {money(gross)} + {money(feeBaseExtra)} ={" "}
-                          <strong className="num">{money(feeBase)}</strong> → honorários de{" "}
-                          <strong className="num">{money(feeFromPercent)}</strong>, sendo{" "}
-                          <strong className="num">{money(feeOverExtra)}</strong> por conta do valor
-                          recebido direto.
+                          Honorários: {money(contractualFee)} sobre o valor bruto de {money(gross)}.
+                          Transita pela nossa conta {money(gross)} − {money(recebidoDireto)} ={" "}
+                          <strong className="num">
+                            {money(Math.max(round2(gross - recebidoDireto), 0))}
+                          </strong>
+                          , e desse valor a cliente fica com{" "}
+                          <strong className="num">{money(clientNoCronograma)}</strong>.
                         </p>
                       )}
                     </div>
@@ -1244,24 +1231,11 @@ function AcordosPage() {
                         value={form.success_fee_amount}
                         onChange={(e) => updateForm({ success_fee_amount: e.target.value })}
                       />
-                      {successFee > 0 && (
-                        <label className="flex items-start gap-2 pt-1 text-xs">
-                          <Checkbox
-                            checked={form.success_fee_included}
-                            onCheckedChange={(v) =>
-                              updateForm({ success_fee_included: v === true })
-                            }
-                          />
-                          <span className="text-muted-foreground">
-                            A sucumbência já está dentro do valor bruto.
-                            <span className="mt-0.5 block">
-                              {form.success_fee_included
-                                ? `Total a distribuir: ${money(gross)}.`
-                                : `Por fora — total a distribuir: ${money(gross + successFee)}.`}
-                            </span>
-                          </span>
-                        </label>
-                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Sempre por fora: não entra no valor bruto nem na base do percentual. Soma
+                        no total do escritório e ganha cronograma próprio, com as datas em que a
+                        parte contrária vai pagar.
+                      </p>
                     </div>
                     <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
                       <Label htmlFor="cst">Reembolso de custas</Label>
@@ -1472,13 +1446,14 @@ function AcordosPage() {
                               <strong className="num text-foreground">{money(client)}</strong> que
                               ficam com ela não viram parcela a receber, porque nunca passam pela
                               nossa conta.
-                              {successFee > 0 && !successInsideGross && (
+                              {successFee > 0 && (
                                 <>
                                   {" "}
                                   A sucumbência de{" "}
-                                  <strong className="num text-foreground">{money(successFee)}</strong>{" "}
-                                  é paga pela empresa — marque a opção abaixo para ela virar
-                                  parcelas próprias.
+                                  <strong className="num text-foreground">
+                                    {money(successFee)}
+                                  </strong>{" "}
+                                  é paga pela empresa, em parcelas próprias.
                                 </>
                               )}
                             </p>
@@ -1563,68 +1538,54 @@ function AcordosPage() {
                           </div>
                         )}
 
-                        {/* Caso comum: a cliente recebe o acordo e repassa a
-                            parte do escritório, enquanto a sucumbência é paga
-                            direto pela parte contrária — em datas próprias. */}
-                        {successFee > 0 && !isServiceFee && (
+                        {/* A sucumbência é paga direto pela parte contrária, e
+                            quase nunca nas mesmas datas do acordo da cliente —
+                            por isso ela sempre tem trilha própria. */}
+                        {successSeparated && (
                           <div className="rounded-md border border-border p-3">
-                            <label className="flex items-start gap-2 text-sm">
-                              <Checkbox
-                                checked={form.success_separate}
-                                onCheckedChange={(v) =>
-                                  updateForm({ success_separate: v === true })
-                                }
-                              />
-                              <span>
-                                A sucumbência é paga direto pela parte contrária, em datas
-                                próprias
-                                <span className="mt-0.5 block text-xs text-muted-foreground">
-                                  Gera parcelas separadas para os {money(successFee)} de
-                                  sucumbência. O cronograma do acordo fica só com o que passa
-                                  pela cliente.
-                                </span>
+                            <p className="text-sm">
+                              Sucumbência de {money(successFee)}, paga direto pela parte contrária
+                              <span className="mt-0.5 block text-xs text-muted-foreground">
+                                Vira parcelas próprias, com as datas dela. O cronograma do acordo
+                                fica só com o que passa pela cliente.
                               </span>
-                            </label>
+                            </p>
 
-                            {form.success_separate && (
-                              <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                                <div className="space-y-2">
-                                  <Label htmlFor="spar">Parcelas da sucumbência</Label>
-                                  <Input
-                                    id="spar"
-                                    type="number"
-                                    min="1"
-                                    value={form.success_parcels}
-                                    onChange={(e) =>
-                                      updateForm({ success_parcels: e.target.value })
-                                    }
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="sfst">1º vencimento</Label>
-                                  <Input
-                                    id="sfst"
-                                    type="date"
-                                    value={form.success_first_due}
-                                    onChange={(e) =>
-                                      updateForm({ success_first_due: e.target.value })
-                                    }
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="sper">Periodicidade (meses)</Label>
-                                  <Input
-                                    id="sper"
-                                    type="number"
-                                    min="1"
-                                    value={form.success_periodicity}
-                                    onChange={(e) =>
-                                      updateForm({ success_periodicity: e.target.value })
-                                    }
-                                  />
-                                </div>
+                            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                              <div className="space-y-2">
+                                <Label htmlFor="spar">Parcelas da sucumbência</Label>
+                                <Input
+                                  id="spar"
+                                  type="number"
+                                  min="1"
+                                  value={form.success_parcels}
+                                  onChange={(e) => updateForm({ success_parcels: e.target.value })}
+                                />
                               </div>
-                            )}
+                              <div className="space-y-2">
+                                <Label htmlFor="sfst">1º vencimento</Label>
+                                <Input
+                                  id="sfst"
+                                  type="date"
+                                  value={form.success_first_due}
+                                  onChange={(e) =>
+                                    updateForm({ success_first_due: e.target.value })
+                                  }
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="sper">Periodicidade (meses)</Label>
+                                <Input
+                                  id="sper"
+                                  type="number"
+                                  min="1"
+                                  value={form.success_periodicity}
+                                  onChange={(e) =>
+                                    updateForm({ success_periodicity: e.target.value })
+                                  }
+                                />
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1652,29 +1613,24 @@ function AcordosPage() {
                         <p className="mb-3 border-b border-border pb-3 text-xs text-muted-foreground">
                           Valor bruto do acordo:{" "}
                           <strong className="num text-foreground">{money(gross)}</strong>
-                          {successFee > 0 &&
-                            (successInsideGross ? (
-                              <> — sucumbência de {money(successFee)} já incluída.</>
-                            ) : (
-                              <>
-                                {" "}
-                                + sucumbência de {money(successFee)} por fora ={" "}
-                                <strong className="num text-foreground">
-                                  {money(grossPlusSuccess)}
-                                </strong>
-                                .
-                              </>
-                            ))}
+                          {successFee > 0 && (
+                            <>
+                              {" "}
+                              + sucumbência de {money(successFee)} por fora ={" "}
+                              <strong className="num text-foreground">
+                                {money(round2(gross + successFee))}
+                              </strong>
+                              .
+                            </>
+                          )}
                         </p>
                       )}
-                      {feeBaseExtra > 0 && (
+                      {recebidoDireto > 0 && (
                         <p className="mb-3 border-b border-border pb-3 text-xs text-muted-foreground">
-                          A cliente recebeu{" "}
-                          <strong className="num text-foreground">{money(feeBaseExtra)}</strong>{" "}
-                          direto. Isso só aumentou a base dos honorários (
-                          <strong className="num text-foreground">{money(feeBase)}</strong>
-                          {feeOverExtra > 0 && <> — {money(feeOverExtra)} a mais de honorário</>}).
-                          O valor em si não entra no cronograma, no caixa nem no repasse.
+                          Desse bruto, a cliente já sacou{" "}
+                          <strong className="num text-foreground">{money(recebidoDireto)}</strong>{" "}
+                          direto. Os honorários continuam calculados sobre o bruto inteiro, mas
+                          esse valor não entra no cronograma, no caixa nem no repasse.
                         </p>
                       )}
                       <div className="grid gap-2 sm:grid-cols-2">
