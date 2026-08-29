@@ -1511,6 +1511,20 @@ export type Database = {
         Args: { _payload: Json }
         Returns: Json
       }
+      update_installment: {
+        Args: {
+          _client_amount?: number
+          _cost_reimbursement?: number
+          _due_date?: string
+          _fee_amount?: number
+          _gross_amount?: number
+          _id: string
+          _label?: string
+          _stream?: string
+          _success_fee_amount?: number
+        }
+        Returns: undefined
+      }
       update_manual_transaction: {
         Args: {
           _amount: number
@@ -1523,6 +1537,37 @@ export type Database = {
           _payment_method?: string
           _status: string
           _type: string
+        }
+        Returns: undefined
+      }
+      update_receivable: {
+        Args: {
+          _agreement_date?: string
+          _case_id?: string
+          _cost_reimbursement?: number
+          _description?: string
+          _expected_client_amount?: number
+          _expected_firm_amount?: number
+          _flow?: string
+          _gross_amount?: number
+          _id: string
+          _is_estimated?: boolean
+          _notes?: string
+          _status: string
+          _success_fee_amount?: number
+          _type: string
+        }
+        Returns: undefined
+      }
+      update_transfer: {
+        Args: {
+          _amount?: number
+          _bank_account_id?: string
+          _destination_info?: string
+          _id: string
+          _notes?: string
+          _scheduled_for?: string
+          _status?: string
         }
         Returns: undefined
       }

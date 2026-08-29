@@ -62,7 +62,11 @@ export const Route = createFileRoute("/_authenticated/acordos")({
 
 type Step = 1 | 2 | 3 | 4;
 
-type DistributionMode = "proporcional" | "escritorio_primeiro" | "manual";
+type DistributionMode =
+  | "proporcional"
+  | "escritorio_primeiro"
+  | "meio_a_meio"
+  | "manual";
 
 type ScheduleRow = {
   label: string;
@@ -97,6 +101,27 @@ function allocateByCapacity(
 
     if (index === capacities.length - 1 || capacity >= totalRemaining) {
       allocation = { ...remaining };
+    } else if (mode === "meio_a_meio") {
+      // Metade da parcela para o escritório (honorários e custas) e metade
+      // para a cliente, até o escritório completar o que lhe cabe. A partir
+      // daí a parcela inteira vai para a cliente — e, se a cliente terminar
+      // antes, o que sobra fecha o lado do escritório.
+      const metade = Math.floor(capacity / 2);
+      let ladoEscritorio = Math.min(metade, remaining.firm + remaining.costs);
+      allocation.firm = Math.min(ladoEscritorio, remaining.firm);
+      ladoEscritorio -= allocation.firm;
+      allocation.costs = Math.min(ladoEscritorio, remaining.costs);
+
+      let sobra = capacity - allocation.firm - allocation.costs;
+      allocation.client = Math.min(sobra, remaining.client);
+      sobra -= allocation.client;
+
+      if (sobra > 0) {
+        const maisFirm = Math.min(sobra, remaining.firm - allocation.firm);
+        allocation.firm += maisFirm;
+        sobra -= maisFirm;
+        allocation.costs += Math.min(sobra, remaining.costs - allocation.costs);
+      }
     } else if (mode === "escritorio_primeiro") {
       let available = capacity;
       allocation.firm = Math.min(available, remaining.firm);
@@ -191,6 +216,23 @@ const EMPTY = {
 function AcordosPage() {
   const { profile, canWrite, can, isMainAdmin } = useAuth();
   const canCancel = can("acordos", "cancel_or_reverse");
+  // Editar acordo é permissão à parte: nasce só para o Administrador e pode
+  // ser liberada por perfil na tela Usuários e Perfis de Acesso.
+  const canEdit = can("acordos", "edit");
+  const [editTarget, setEditTarget] = useState<{ id: string; name: string } | null>(null);
+  const [editForm, setEditForm] = useState({
+    type: "acordo",
+    status: "confirmado",
+    description: "",
+    notes: "",
+    case_id: "",
+    agreement_date: todayISO(),
+    gross_amount: "",
+    success_fee_amount: "",
+    cost_reimbursement: "",
+    expected_firm_amount: "",
+    expected_client_amount: "",
+  });
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>(1);
@@ -230,6 +272,7 @@ function AcordosPage() {
     }
   }
 
+  const [sortBy, setSortBy] = useState("recentes");
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
@@ -451,6 +494,38 @@ function AcordosPage() {
     );
   }
 
+  /** Lista ordenada conforme o seletor acima da tabela. */
+  const sortedReceivables = useMemo(() => {
+    const rows = [...(data?.receivables ?? [])];
+    const nome = (r: (typeof rows)[number]) =>
+      ((r.clients as { name: string } | null)?.name ?? "").toLocaleLowerCase("pt-BR");
+    // O total a receber é o que a tabela mostra, então é por ele que se ordena
+    // "por valor" — e não pelo bruto, que pode não incluir a sucumbência.
+    const total = (r: (typeof rows)[number]) =>
+      num(r.expected_firm_amount) + num(r.expected_client_amount) + num(r.cost_reimbursement);
+
+    switch (sortBy) {
+      case "cliente":
+        return rows.sort((a, b) => nome(a).localeCompare(nome(b), "pt-BR"));
+      case "cliente_desc":
+        return rows.sort((a, b) => nome(b).localeCompare(nome(a), "pt-BR"));
+      case "data":
+        return rows.sort((a, b) =>
+          String(a.agreement_date ?? "").localeCompare(String(b.agreement_date ?? "")),
+        );
+      case "data_desc":
+        return rows.sort((a, b) =>
+          String(b.agreement_date ?? "").localeCompare(String(a.agreement_date ?? "")),
+        );
+      case "valor":
+        return rows.sort((a, b) => total(b) - total(a));
+      case "valor_asc":
+        return rows.sort((a, b) => total(a) - total(b));
+      default:
+        return rows;
+    }
+  }, [data, sortBy]);
+
   const create = useMutation({
     mutationFn: async () => {
       if (!profile) throw new Error("Perfil não carregado");
@@ -522,6 +597,40 @@ function AcordosPage() {
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro ao salvar", { description: friendlyError(e) }),
+  });
+
+  const updateReceivable = useMutation({
+    mutationFn: async () => {
+      if (!editTarget) throw new Error("Acordo inválido");
+      if (!editForm.description.trim() && !editForm.notes.trim()) {
+        // Nada obrigatório aqui: descrição vazia é aceita, só não pode
+        // faltar o essencial que o banco valida (tipo e situação).
+      }
+      const { error } = await supabase.rpc(
+        "update_receivable",
+        dropUndefined({
+          _id: editTarget.id,
+          _type: editForm.type,
+          _status: editForm.status,
+          _description: editForm.description.trim() || undefined,
+          _notes: editForm.notes.trim() || undefined,
+          _case_id: editForm.case_id || undefined,
+          _agreement_date: editForm.agreement_date || undefined,
+          _gross_amount: num(Number(editForm.gross_amount)),
+          _success_fee_amount: num(Number(editForm.success_fee_amount)),
+          _cost_reimbursement: num(Number(editForm.cost_reimbursement)),
+          _expected_firm_amount: num(Number(editForm.expected_firm_amount)),
+          _expected_client_amount: num(Number(editForm.expected_client_amount)),
+        }),
+      );
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Acordo atualizado.");
+      setEditTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao editar", { description: friendlyError(e) }),
   });
 
   const cancelReceivable = useMutation({
@@ -892,6 +1001,9 @@ function AcordosPage() {
                               </SelectItem>
                               <SelectItem value="escritorio_primeiro">
                                 Primeiros valores para o escritório
+                              </SelectItem>
+                              <SelectItem value="meio_a_meio">
+                                Metade para cada, até fechar o do escritório
                               </SelectItem>
                               <SelectItem value="manual">Personalizado manualmente</SelectItem>
                             </SelectContent>
@@ -1278,6 +1390,29 @@ function AcordosPage() {
         }
       />
 
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Label htmlFor="ord" className="text-sm">
+          Ordenar por
+        </Label>
+        <Select value={sortBy} onValueChange={setSortBy}>
+          <SelectTrigger id="ord" className="w-64">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="recentes">Cadastrados por último</SelectItem>
+            <SelectItem value="cliente">Cliente (A–Z)</SelectItem>
+            <SelectItem value="cliente_desc">Cliente (Z–A)</SelectItem>
+            <SelectItem value="data_desc">Data do acordo (mais recente)</SelectItem>
+            <SelectItem value="data">Data do acordo (mais antiga)</SelectItem>
+            <SelectItem value="valor">Valor (maior primeiro)</SelectItem>
+            <SelectItem value="valor_asc">Valor (menor primeiro)</SelectItem>
+          </SelectContent>
+        </Select>
+        <span className="text-xs text-muted-foreground">
+          {sortedReceivables.length} acordo(s)
+        </span>
+      </div>
+
       <div className="panel overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -1290,7 +1425,7 @@ function AcordosPage() {
               <th className="text-right">Escritório</th>
               <th className="text-right">Cliente</th>
               <th className="text-right">Recebido</th>
-              {(canCancel || isMainAdmin) && <th className="p-3" />}
+              {(canCancel || canEdit || isMainAdmin) && <th className="p-3" />}
             </tr>
           </thead>
           <tbody>
@@ -1308,7 +1443,7 @@ function AcordosPage() {
                 </td>
               </tr>
             )}
-            {(data?.receivables ?? []).map((r) => {
+            {sortedReceivables.map((r) => {
               // O que será efetivamente cobrado nas parcelas. Pode diferir do
               // valor bruto quando a sucumbência foi cadastrada por fora dele.
               const totalToReceive =
@@ -1352,8 +1487,35 @@ function AcordosPage() {
                   <td className="num text-right">{money(r.expected_firm_amount)}</td>
                   <td className="num text-right">{money(r.expected_client_amount)}</td>
                   <td className="num text-right">{money(paid)}</td>
-                   {(canCancel || isMainAdmin) && (
+                   {(canCancel || canEdit || isMainAdmin) && (
                      <td className="p-3 text-right whitespace-nowrap">
+                      {canEdit && r.status !== "cancelado" && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            setEditTarget({
+                              id: r.id,
+                              name: (r.clients as { name: string } | null)?.name ?? "acordo",
+                            });
+                            setEditForm({
+                              type: r.type,
+                              status: r.status,
+                              description: r.description ?? "",
+                              notes: r.notes ?? "",
+                              case_id: r.case_id ?? "",
+                              agreement_date: r.agreement_date ?? todayISO(),
+                              gross_amount: String(num(r.gross_amount)),
+                              success_fee_amount: String(num(r.success_fee_amount)),
+                              cost_reimbursement: String(num(r.cost_reimbursement)),
+                              expected_firm_amount: String(num(r.expected_firm_amount)),
+                              expected_client_amount: String(num(r.expected_client_amount)),
+                            });
+                          }}
+                        >
+                          Editar
+                        </Button>
+                      )}
                        {canCancel && r.status !== "cancelado" && paid <= 0.01 && (
                         <Button
                           size="sm"
@@ -1393,6 +1555,153 @@ function AcordosPage() {
           </tbody>
         </table>
       </div>
+
+      <Dialog open={!!editTarget} onOpenChange={(v) => !v && setEditTarget(null)}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Editar acordo</DialogTitle>
+            <DialogDescription>
+              {editTarget?.name} — o que já foi recebido não pode ser desfeito por aqui: os
+              valores esperados não podem ficar abaixo do que já entrou. Para mexer no que já foi
+              pago, estorne o recebimento antes.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Tipo</Label>
+              <Select
+                value={editForm.type}
+                onValueChange={(v) => setEditForm({ ...editForm, type: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(RECEIVABLE_TYPE_LABEL).map(([k, v]) => (
+                    <SelectItem key={k} value={k}>
+                      {k === "honorarios" ? "Honorários de serviço" : v}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Situação</Label>
+              <Select
+                value={editForm.status}
+                onValueChange={(v) => setEditForm({ ...editForm, status: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(RECEIVABLE_STATUS_LABEL)
+                    .filter(([k]) => k !== "cancelado")
+                    .map(([k, v]) => (
+                      <SelectItem key={k} value={k}>
+                        {v}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="edesc">Descrição</Label>
+              <Input
+                id="edesc"
+                value={editForm.description}
+                onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edata">Data do acordo</Label>
+              <Input
+                id="edata"
+                type="date"
+                value={editForm.agreement_date}
+                onChange={(e) => setEditForm({ ...editForm, agreement_date: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ebruto">Valor bruto</Label>
+              <Input
+                id="ebruto"
+                type="number"
+                step="0.01"
+                value={editForm.gross_amount}
+                onChange={(e) => setEditForm({ ...editForm, gross_amount: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="esuc">Sucumbência</Label>
+              <Input
+                id="esuc"
+                type="number"
+                step="0.01"
+                value={editForm.success_fee_amount}
+                onChange={(e) => setEditForm({ ...editForm, success_fee_amount: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ecus">Reembolso de custas</Label>
+              <Input
+                id="ecus"
+                type="number"
+                step="0.01"
+                value={editForm.cost_reimbursement}
+                onChange={(e) => setEditForm({ ...editForm, cost_reimbursement: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="efirm">Esperado do escritório</Label>
+              <Input
+                id="efirm"
+                type="number"
+                step="0.01"
+                value={editForm.expected_firm_amount}
+                onChange={(e) =>
+                  setEditForm({ ...editForm, expected_firm_amount: e.target.value })
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ecli">Esperado da cliente</Label>
+              <Input
+                id="ecli"
+                type="number"
+                step="0.01"
+                value={editForm.expected_client_amount}
+                onChange={(e) =>
+                  setEditForm({ ...editForm, expected_client_amount: e.target.value })
+                }
+              />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="enotes">Observações</Label>
+              <Textarea
+                id="enotes"
+                value={editForm.notes}
+                onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
+              />
+            </div>
+            <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground sm:col-span-2">
+              Editar aqui muda o acordo, não o cronograma já gerado. As parcelas continuam como
+              estão — ajuste-as em Parcelas e Recebimentos se os valores mudaram.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => updateReceivable.mutate()}
+              disabled={updateReceivable.isPending}
+            >
+              {updateReceivable.isPending ? "Salvando…" : "Salvar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!cancelTarget} onOpenChange={(v) => !v && setCancelTarget(null)}>
         <DialogContent>

@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, TRANSFER_STATUS_LABEL } from "@/lib/format";
+import { dropUndefined } from "@/lib/utils";
 import { friendlyError } from "@/lib/errors";
 import { toast } from "sonner";
 
@@ -65,6 +66,18 @@ const EMPTY = {
 function RepassesPage() {
   const { profile, canWrite, can } = useAuth();
   const canCancel = can("repasses", "cancel_or_reverse");
+  // Editar repasse é permissão à parte: nasce só para o Administrador e pode
+  // ser liberada por perfil na tela Usuários e Perfis de Acesso.
+  const canEdit = can("repasses", "edit");
+  const [editTarget, setEditTarget] = useState<{ id: string; name: string } | null>(null);
+  const [editForm, setEditForm] = useState({
+    amount: "",
+    scheduled_for: todayISO(),
+    bank_account_id: "",
+    destination_info: "",
+    notes: "",
+    status: "pendente",
+  });
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
@@ -200,6 +213,33 @@ function RepassesPage() {
       void qc.invalidateQueries();
     },
     onError: (e: Error) => toast.error("Erro", { description: friendlyError(e) }),
+  });
+
+  const updateTransfer = useMutation({
+    mutationFn: async () => {
+      if (!editTarget) throw new Error("Repasse inválido");
+      const amount = num(Number(editForm.amount));
+      if (amount <= 0) throw new Error("Informe um valor maior que zero");
+      const { error } = await supabase.rpc(
+        "update_transfer",
+        dropUndefined({
+          _id: editTarget.id,
+          _amount: amount,
+          _scheduled_for: editForm.scheduled_for || undefined,
+          _bank_account_id: editForm.bank_account_id || undefined,
+          _destination_info: editForm.destination_info.trim() || undefined,
+          _notes: editForm.notes.trim() || undefined,
+          _status: editForm.status || undefined,
+        }),
+      );
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Repasse atualizado.");
+      setEditTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao editar", { description: friendlyError(e) }),
   });
 
   const cancelTransfer = useMutation({
@@ -452,6 +492,30 @@ function RepassesPage() {
                         Marcar pago
                       </Button>
                     )}
+                    {/* Repasse pago já mexeu no caixa: para corrigir, cancela
+                        e cria outro. Por isso só edita o que está pendente. */}
+                    {canEdit && t.status !== "pago" && t.status !== "cancelado" && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setEditTarget({
+                            id: t.id,
+                            name: (t.clients as { name: string } | null)?.name ?? "cliente",
+                          });
+                          setEditForm({
+                            amount: String(num(t.amount)),
+                            scheduled_for: t.scheduled_for ?? todayISO(),
+                            bank_account_id: t.bank_account_id ?? "",
+                            destination_info: t.destination_info ?? "",
+                            notes: t.notes ?? "",
+                            status: t.status,
+                          });
+                        }}
+                      >
+                        Editar
+                      </Button>
+                    )}
                     {canCancel && t.status !== "cancelado" && (
                       <Button
                         size="sm"
@@ -531,6 +595,93 @@ function RepassesPage() {
               }
             >
               {markPaid.isPending ? "Salvando…" : "Confirmar pagamento"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!editTarget} onOpenChange={(v) => !v && setEditTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Editar repasse</DialogTitle>
+            <DialogDescription>Repasse para {editTarget?.name}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="ev">Valor</Label>
+              <Input
+                id="ev"
+                type="number"
+                step="0.01"
+                value={editForm.amount}
+                onChange={(e) => setEditForm({ ...editForm, amount: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ed">Previsto para</Label>
+              <Input
+                id="ed"
+                type="date"
+                value={editForm.scheduled_for}
+                onChange={(e) => setEditForm({ ...editForm, scheduled_for: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Situação</Label>
+              <Select
+                value={editForm.status}
+                onValueChange={(v) => setEditForm({ ...editForm, status: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pendente">Pendente</SelectItem>
+                  <SelectItem value="agendado">Agendado</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Conta de saída</Label>
+              <Select
+                value={editForm.bank_account_id}
+                onValueChange={(v) => setEditForm({ ...editForm, bank_account_id: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(data?.banks ?? []).map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="edest">PIX / conta da cliente</Label>
+              <Input
+                id="edest"
+                value={editForm.destination_info}
+                onChange={(e) => setEditForm({ ...editForm, destination_info: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="enot">Observações</Label>
+              <Textarea
+                id="enot"
+                value={editForm.notes}
+                onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)}>
+              Cancelar
+            </Button>
+            <Button onClick={() => updateTransfer.mutate()} disabled={updateTransfer.isPending}>
+              {updateTransfer.isPending ? "Salvando…" : "Salvar"}
             </Button>
           </DialogFooter>
         </DialogContent>
