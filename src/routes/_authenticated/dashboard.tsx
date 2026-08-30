@@ -353,11 +353,16 @@ function Dashboard() {
   // não vai para a tela.
   const periodTemEmprestimo = periodFinancingIn > 0.01;
   const periodProfit = periodFirmRevenue - periodExpenses;
-  const activeCases = d.cases.filter((c) => c.status === "ativo").length;
+  // O `?? []` não é paranoia: no preview, o React Query guarda em memória o
+  // resultado da versão anterior do código. Ao trocar o módulo a quente depois
+  // de acrescentar um campo nesta consulta, o componente renderiza uma vez com
+  // o objeto antigo, em que o campo ainda não existe — e a tela cai inteira.
+  const casos = d.cases ?? [];
+  const activeCases = casos.filter((c) => c.status === "ativo").length;
   const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
 
   // Área do direito de cada processo, para separar trabalhista de cível.
-  const areaDoCaso = new Map(d.cases.map((c) => [c.id, (c.practice_area ?? "").trim()]));
+  const areaDoCaso = new Map(casos.map((c) => [c.id, (c.practice_area ?? "").trim()]));
   const areasDisponiveis = [...new Set([...areaDoCaso.values()].filter(Boolean))].sort((a, b) =>
     a.localeCompare(b, "pt-BR"),
   );
