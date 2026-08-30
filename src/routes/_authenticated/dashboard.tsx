@@ -79,7 +79,7 @@ function useDashboardData() {
   return useQuery({
     queryKey: ["dashboard"],
     queryFn: async () => {
-      const [inst, balances, banks, txs, receivables, activeCases, receipts] =
+      const [inst, balances, banks, txs, receivables, allCases, receipts] =
         await Promise.all([
         supabase.from("v_installments").select("*"),
         supabase.from("v_client_balances").select("*"),
@@ -90,12 +90,16 @@ function useDashboardData() {
           .eq("status", "pago"),
         supabase
           .from("legal_receivables")
-          .select("id, status, is_estimated, expected_firm_amount, description, client_id")
+          .select(
+            "id, status, type, is_estimated, expected_firm_amount, gross_amount, description, client_id, case_id",
+          )
           .is("deleted_at", null),
+        // Os processos vêm inteiros (e não só contados) porque é neles que
+        // está a área do direito — é ela que separa trabalhista de cível nas
+        // métricas por cliente.
         supabase
           .from("cases")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "ativo")
+          .select("id, practice_area, status")
           .is("deleted_at", null),
         // O dinheiro de terceiros precisa vir do recebimento, não da parcela:
         // a parcela só sabe quanto é da cliente, não se passou pela conta do
@@ -114,7 +118,11 @@ function useDashboardData() {
         banks: banks.data ?? [],
         txs: txs.data ?? [],
         receivables: receivables.data ?? [],
-        activeCasesCount: activeCases.count ?? 0,
+        cases: (allCases.data ?? []) as {
+          id: string;
+          practice_area: string | null;
+          status: string;
+        }[],
         receipts: receipts.data ?? [],
       };
     },
@@ -135,7 +143,7 @@ function usePeriodData(start: string, end: string) {
         supabase
           .from("receipts")
           .select(
-            "fee_amount, success_fee_amount, cost_reimbursement, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id))",
+            "fee_amount, success_fee_amount, cost_reimbursement, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id, case_id))",
           )
           .is("reversed_at", null)
           .gte("received_on", start)
@@ -178,13 +186,23 @@ function useMixData(start: string, end: string) {
   });
 }
 
-/** Extrai o id do cliente da estrutura aninhada que o PostgREST devolve. */
-function clientIdOf(row: unknown): string | null {
+/** Chega ao acordo a partir da estrutura aninhada que o PostgREST devolve. */
+function receivableOf(row: unknown): { client_id?: string; case_id?: string } | undefined {
   const inst = (row as { installments?: unknown }).installments;
   const one = Array.isArray(inst) ? inst[0] : inst;
   const recv = (one as { legal_receivables?: unknown } | undefined)?.legal_receivables;
   const rec = Array.isArray(recv) ? recv[0] : recv;
-  return (rec as { client_id?: string } | undefined)?.client_id ?? null;
+  return rec as { client_id?: string; case_id?: string } | undefined;
+}
+
+/** Extrai o id do cliente da estrutura aninhada que o PostgREST devolve. */
+function clientIdOf(row: unknown): string | null {
+  return receivableOf(row)?.client_id ?? null;
+}
+
+/** Extrai o id do processo, para saber a área do direito do recebimento. */
+function caseIdOf(row: unknown): string | null {
+  return receivableOf(row)?.case_id ?? null;
 }
 
 type DashboardLink = "/caixa" | "/repasses" | "/parcelas" | "/acordos";
@@ -233,6 +251,24 @@ function Card({
 function Dashboard() {
   const { data, isLoading, error } = useDashboardData();
   const today = todayISO();
+
+  // Área do direito das métricas por cliente. Fica guardada no navegador para
+  // não ter que reescolher "Trabalhista" toda vez que abrir o dashboard.
+  const [area, setArea] = useState(() => {
+    try {
+      return localStorage.getItem("dashboard-area") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  function escolherArea(valor: string) {
+    setArea(valor);
+    try {
+      localStorage.setItem("dashboard-area", valor);
+    } catch {
+      // Navegador sem armazenamento: o filtro só não é lembrado.
+    }
+  }
 
   const [periodType, setPeriodType] = useState<PeriodType>("mes");
   const [anchor, setAnchor] = useState(today);
@@ -317,24 +353,73 @@ function Dashboard() {
   // não vai para a tela.
   const periodTemEmprestimo = periodFinancingIn > 0.01;
   const periodProfit = periodFirmRevenue - periodExpenses;
-  const activeCases = d.activeCasesCount;
+  const activeCases = d.cases.filter((c) => c.status === "ativo").length;
   const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
+
+  // Área do direito de cada processo, para separar trabalhista de cível.
+  const areaDoCaso = new Map(d.cases.map((c) => [c.id, (c.practice_area ?? "").trim()]));
+  const areasDisponiveis = [...new Set([...areaDoCaso.values()].filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, "pt-BR"),
+  );
+  const naArea = (caseId: string | null | undefined) =>
+    !area || (!!caseId && areaDoCaso.get(caseId) === area);
 
   // Quantos clientes distintos efetivamente pagaram alguma coisa no período —
   // é a base tanto do custo por cliente quanto da receita média por cliente.
   // Conta o cliente uma vez só, mesmo que ele tenha pago cinco parcelas.
+  // Com uma área escolhida, só entram os recebimentos de processos daquela
+  // área — é o que tira o cível de dentro das médias da trabalhista.
+  const recebimentosDaArea = (periodData?.receipts ?? []).filter((r) => naArea(caseIdOf(r)));
   const payingClients = new Set<string>();
-  for (const r of periodData?.receipts ?? []) {
+  for (const r of recebimentosDaArea) {
     const id = clientIdOf(r);
     if (id) payingClients.add(id);
   }
   const payingCount = payingClients.size;
-  // Custo de captação: quanto o escritório gastou para cada cliente que pagou.
+  const receitaDaArea = recebimentosDaArea.reduce(
+    (s, r) => s + num(r.fee_amount) + num(r.success_fee_amount),
+    0,
+  );
+  // Custo por cliente e lucro por cliente só existem sem filtro de área: a
+  // despesa do escritório (aluguel, salários) não se divide por área do
+  // direito, então rateá-la só entre os clientes de uma área daria um número
+  // inventado.
   const costPerClient = payingCount > 0 ? periodExpenses / payingCount : 0;
   // Ticket médio: quanto o escritório faturou, em média, por cliente pagante.
-  const revenuePerClient = payingCount > 0 ? periodFirmRevenue / payingCount : 0;
+  const revenuePerClient = payingCount > 0 ? receitaDaArea / payingCount : 0;
   // O que sobra por cliente: receita menos despesa, rateada pelos pagantes.
   const profitPerClient = revenuePerClient - costPerClient;
+
+  // ---------------------------------------------------------------
+  // Ações com resultado: acordo ou sentença já fechados, em que já se sabe
+  // quanto o escritório tem a receber. É a base da média por cliente.
+  // ---------------------------------------------------------------
+  const comResultado = d.receivables.filter(
+    (r) =>
+      (r.type === "acordo" || r.type === "sentenca") &&
+      r.status !== "cancelado" &&
+      naArea(r.case_id as string | null),
+  );
+  const clientesComResultado = new Set(
+    comResultado.map((r) => r.client_id as string).filter(Boolean),
+  ).size;
+  const aReceberComResultado = comResultado.reduce(
+    (s, r) => s + num(r.expected_firm_amount as number),
+    0,
+  );
+  const brutoComResultado = comResultado.reduce((s, r) => s + num(r.gross_amount as number), 0);
+  const mediaPorClienteComResultado =
+    clientesComResultado > 0 ? aReceberComResultado / clientesComResultado : 0;
+  const mediaBrutoPorCliente =
+    clientesComResultado > 0 ? brutoComResultado / clientesComResultado : 0;
+  // Acordo sem processo vinculado não tem área: fica de fora quando se filtra,
+  // e quem lê precisa saber disso para não achar que sumiu dinheiro.
+  const semAreaDefinida = d.receivables.filter(
+    (r) =>
+      (r.type === "acordo" || r.type === "sentenca") &&
+      r.status !== "cancelado" &&
+      !areaDoCaso.get((r.case_id as string) ?? ""),
+  ).length;
 
   const totalBank = d.banks.reduce((s, b) => s + num(b.balance as number), 0);
   const firmRevenue = d.installments.reduce(
@@ -362,8 +447,11 @@ function Dashboard() {
   const transferred = d.balances.reduce((s, b) => s + num(b.transferred as number), 0);
   const pendingTransfer = d.balances.reduce((s, b) => s + num(b.pending_transfer as number), 0);
 
+  // Estimado fica de fora daqui porque tem card próprio logo ao lado: as
+  // parcelas de um acordo estimado estavam sendo contadas nos dois, e a soma
+  // dos dois cards passava do que o escritório tem a receber.
   const openFirmExpected = d.installments
-    .filter((i) => i.status !== "PAGA" && i.status !== "CANCELADA")
+    .filter((i) => !i.is_estimated && i.status !== "PAGA" && i.status !== "CANCELADA")
     .reduce(
       (s, i) =>
         s +
@@ -373,8 +461,11 @@ function Dashboard() {
         num(i.paid_success_fee),
       0,
     );
+  // Acordo cancelado continua na tabela com status 'cancelado' (só o excluído
+  // ganha deleted_at). Sem tirar o cancelado, este card contava dinheiro que
+  // já se sabe que não vem.
   const estimated = d.receivables
-    .filter((r) => r.is_estimated)
+    .filter((r) => r.is_estimated && r.status !== "cancelado")
     .reduce((s, r) => s + num(r.expected_firm_amount as number), 0);
 
   // Números do gráfico "escritório x terceiros", no recorte só dele.
@@ -556,6 +647,85 @@ function Dashboard() {
           </div>
         </div>
 
+        {/* Filtro de área: o que separa a trabalhista do cível nas médias. */}
+        {areasDisponiveis.length > 0 && (
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground uppercase">Área do direito</span>
+            <button
+              type="button"
+              onClick={() => escolherArea("")}
+              className={`rounded-md border px-3 py-1 text-xs ${
+                area === ""
+                  ? "border-primary bg-primary/10 text-foreground"
+                  : "border-border text-muted-foreground"
+              }`}
+            >
+              Todas
+            </button>
+            {areasDisponiveis.map((a) => (
+              <button
+                key={a}
+                type="button"
+                onClick={() => escolherArea(a)}
+                className={`rounded-md border px-3 py-1 text-xs ${
+                  area === a
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border text-muted-foreground"
+                }`}
+              >
+                {a}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Ações com resultado: é aqui que mora a média por cliente que
+            interessa — só o que já virou acordo ou sentença. */}
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Clientes com resultado</p>
+            <p className="num mt-1 text-xl font-semibold">{clientesComResultado}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {area ? `Acordo ou sentença em ${area}` : "Com acordo ou sentença"}
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">O escritório vai receber</p>
+            <p className="num mt-1 text-xl font-semibold text-success">
+              {money(aReceberComResultado)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Honorários + sucumbência das ações já decididas
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Média por cliente</p>
+            <p className="num mt-1 text-xl font-semibold text-success">
+              {clientesComResultado > 0 ? money(mediaPorClienteComResultado) : "—"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              O que o escritório recebe, em média, por cliente com resultado
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Conseguido para as clientes</p>
+            <p className="num mt-1 text-xl font-semibold">{money(brutoComResultado)}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {clientesComResultado > 0
+                ? `Média de ${money(mediaBrutoPorCliente)} por cliente`
+                : "Valor bruto das ações"}
+            </p>
+          </div>
+        </div>
+
+        {area && semAreaDefinida > 0 && (
+          <div className="mt-3 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
+            {semAreaDefinida} acordo(s)/sentença(s) estão fora desta conta por não ter processo
+            vinculado com área preenchida. Para entrarem, ligue o acordo a um processo em Acordos e
+            preencha a área do direito dele em Processos.
+          </div>
+        )}
+
         {/* Indicadores por cliente pagante: a base dos dois é a mesma — quantos
             clientes distintos colocaram dinheiro no escritório no período. */}
         <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -564,39 +734,47 @@ function Dashboard() {
             <p className="num mt-1 text-xl font-semibold">{periodLoading ? "…" : payingCount}</p>
             <p className="mt-1 text-xs text-muted-foreground">
               Clientes distintos com recebimento no período
+              {area ? `, em ${area}` : ""}
             </p>
           </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Custo por cliente</p>
-            <p className="num mt-1 text-xl font-semibold text-destructive">
-              {periodLoading ? "…" : payingCount > 0 ? money(costPerClient) : "—"}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Despesas do período ÷ clientes que pagaram
-            </p>
-          </div>
+          {/* Despesa do escritório não se divide por área do direito, então
+              rateá-la só entre os clientes de uma área daria um número
+              inventado. Com filtro ligado, o card sai de cena. */}
+          {!area && (
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Custo por cliente</p>
+              <p className="num mt-1 text-xl font-semibold text-destructive">
+                {periodLoading ? "…" : payingCount > 0 ? money(costPerClient) : "—"}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Despesas do período ÷ clientes que pagaram
+              </p>
+            </div>
+          )}
           <div className="panel p-4">
             <p className="text-xs text-muted-foreground uppercase">Receita média por cliente</p>
             <p className="num mt-1 text-xl font-semibold text-success">
               {periodLoading ? "…" : payingCount > 0 ? money(revenuePerClient) : "—"}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Receita do escritório ÷ clientes que pagaram
+              {area ? `Receita em ${area}` : "Receita do escritório"} ÷ clientes que pagaram
             </p>
           </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Lucro por cliente</p>
-            <p
-              className={`num mt-1 text-xl font-semibold ${
-                profitPerClient >= 0 ? "text-success" : "text-destructive"
-              }`}
-            >
-              {periodLoading ? "…" : payingCount > 0 ? money(profitPerClient) : "—"}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Receita por cliente − custo por cliente
-            </p>
-          </div>
+          {!area && (
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Lucro por cliente</p>
+              <p
+                className={`num mt-1 text-xl font-semibold ${
+                  profitPerClient >= 0 ? "text-success" : "text-destructive"
+                }`}
+              >
+                {periodLoading ? "…" : payingCount > 0 ? money(profitPerClient) : "—"}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Receita por cliente − custo por cliente
+              </p>
+            </div>
+          )}
         </div>
 
         {(periodFinancingIn > 0.01 || periodFinancingOut > 0.01) && (
