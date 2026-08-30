@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
-import { TransferStatusTag } from "@/components/StatusBadge";
+import { StatusBadge, TransferStatusTag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -88,6 +88,8 @@ function RepassesPage() {
   const [payBank, setPayBank] = useState("");
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+  // Extrato de uma cliente: o que já entrou, o que ainda vem e o que falta.
+  const [detalheDe, setDetalheDe] = useState<{ client_id: string; name: string } | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["repasses"],
@@ -271,6 +273,111 @@ function RepassesPage() {
     setPayTarget(t);
     setPayBank("");
   }
+
+  /**
+   * Extrato da cliente aberta em "Detalhes".
+   *
+   * São três perguntas diferentes e cada uma mora numa tabela: o que ela já
+   * recebeu está nos recebimentos, o que ainda vem está nas parcelas, e o
+   * quanto lhe cabe ao todo está no acordo — inclusive a parte que ninguém
+   * pagou ainda.
+   */
+  const { data: extrato, isLoading: extratoLoading } = useQuery({
+    queryKey: ["repasse-extrato", detalheDe?.client_id],
+    enabled: !!detalheDe,
+    queryFn: async () => {
+      const [inst, recv] = await Promise.all([
+        supabase
+          .from("v_installments")
+          .select(
+            "id, due_date, status, label, gross_amount, client_amount, paid_client, balance",
+          )
+          .eq("client_id", detalheDe!.client_id)
+          .is("canceled_at", null)
+          .order("due_date", { ascending: true, nullsFirst: false }),
+        supabase
+          .from("legal_receivables")
+          .select("id, description, type, status, expected_client_amount, gross_amount")
+          .eq("client_id", detalheDe!.client_id)
+          .neq("status", "cancelado")
+          .is("deleted_at", null),
+      ]);
+      if (inst.error) throw inst.error;
+      if (recv.error) throw recv.error;
+
+      const ids = (inst.data ?? []).map((i) => i.id as string);
+      const rec = ids.length
+        ? await supabase
+            .from("receipts")
+            .select(
+              "id, received_on, total_amount, client_amount, client_amount_received_by_firm, client_amount_received_direct",
+            )
+            .in("installment_id", ids)
+            .is("reversed_at", null)
+            .order("received_on", { ascending: false })
+        : { data: [], error: null };
+      if (rec.error) throw rec.error;
+
+      return {
+        installments: (inst.data ?? []) as unknown as {
+          id: string;
+          due_date: string | null;
+          status: string;
+          label: string | null;
+          client_amount: number | null;
+          paid_client: number | null;
+          balance: number | null;
+        }[],
+        receivables: (recv.data ?? []) as unknown as {
+          id: string;
+          description: string | null;
+          expected_client_amount: number | null;
+        }[],
+        receipts: (rec.data ?? []) as unknown as {
+          id: string;
+          received_on: string;
+          total_amount: number;
+          client_amount: number | null;
+          client_amount_received_by_firm: number | null;
+          client_amount_received_direct: number | null;
+        }[],
+      };
+    },
+  });
+
+  /** Os números do extrato, todos derivados da mesma consulta. */
+  const resumoExtrato = useMemo(() => {
+    if (!extrato) return null;
+    const cabeAEla = extrato.receivables.reduce(
+      (s, r) => s + num(r.expected_client_amount),
+      0,
+    );
+    const peloEscritorio = extrato.receipts.reduce(
+      (s, r) => s + num(r.client_amount_received_by_firm),
+      0,
+    );
+    const direto = extrato.receipts.reduce(
+      (s, r) => s + num(r.client_amount_received_direct),
+      0,
+    );
+    const jaEntrou = peloEscritorio + direto;
+    // Parcelas que ainda têm parte dela para acontecer.
+    const aVencer = extrato.installments.filter(
+      (i) => i.status !== "PAGA" && num(i.client_amount) - num(i.paid_client) > 0.01,
+    );
+    return {
+      cabeAEla,
+      peloEscritorio,
+      direto,
+      jaEntrou,
+      faltaAcontecer: Math.max(cabeAEla - jaEntrou, 0),
+      aVencer,
+    };
+  }, [extrato]);
+
+  const saldoDaClienteAberta = (data?.balances ?? []).find(
+    (b) => b.client_id === detalheDe?.client_id,
+  );
 
   const pendingTotal = (data?.balances ?? []).reduce((s, b) => s + num(b.pending_transfer), 0);
   // Só quem o escritório ainda deve. Cliente já quitada polui a lista e
@@ -562,7 +669,8 @@ function RepassesPage() {
                 <th className="p-3">Cliente</th>
                 <th className="text-right">Total que vai receber</th>
                 <th className="text-right">Já repassado</th>
-                <th className="p-3 text-right">Falta receber</th>
+                <th className="text-right">Falta receber</th>
+                <th className="p-3" />
               </tr>
             </thead>
             <tbody>
@@ -571,12 +679,21 @@ function RepassesPage() {
                   <td className="p-3">{b.name}</td>
                   <td className="num text-right">{money(b.received_client)}</td>
                   <td className="num text-right text-muted-foreground">{money(b.transferred)}</td>
-                  <td className="num p-3 text-right font-medium">{money(b.pending_transfer)}</td>
+                  <td className="num text-right font-medium">{money(b.pending_transfer)}</td>
+                  <td className="p-3 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDetalheDe({ client_id: b.client_id, name: b.name })}
+                    >
+                      Detalhes
+                    </Button>
+                  </td>
                 </tr>
               ))}
               {devedores.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="p-6 text-center text-muted-foreground">
+                  <td colSpan={5} className="p-6 text-center text-muted-foreground">
                     Nenhum repasse pendente — todas as clientes estão em dia.
                   </td>
                 </tr>
@@ -585,6 +702,151 @@ function RepassesPage() {
           </table>
         </div>
       </div>
+
+      <Dialog open={!!detalheDe} onOpenChange={(v) => !v && setDetalheDe(null)}>
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{detalheDe?.name}</DialogTitle>
+            <DialogDescription>
+              Tudo o que é dela neste escritório: o que já recebeu, o que ainda vem e o que falta
+              do que foi acordado.
+            </DialogDescription>
+          </DialogHeader>
+
+          {extratoLoading && <p className="text-sm text-muted-foreground">Carregando…</p>}
+
+          {!extratoLoading && resumoExtrato && (
+            <div className="space-y-5">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="panel p-3">
+                  <p className="text-xs text-muted-foreground uppercase">Cabe a ela no acordo</p>
+                  <p className="num mt-1 text-lg font-semibold">
+                    {money(resumoExtrato.cabeAEla)}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Somando os acordos, pagos ou não
+                  </p>
+                </div>
+                <div className="panel p-3">
+                  <p className="text-xs text-muted-foreground uppercase">Já entrou para ela</p>
+                  <p className="num mt-1 text-lg font-semibold text-success">
+                    {money(resumoExtrato.jaEntrou)}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {money(resumoExtrato.peloEscritorio)} pela nossa conta,{" "}
+                    {money(resumoExtrato.direto)} direto
+                  </p>
+                </div>
+                <div className="panel p-3">
+                  <p className="text-xs text-muted-foreground uppercase">Aguardando repasse</p>
+                  <p className="num mt-1 text-lg font-semibold text-warning">
+                    {money(num(saldoDaClienteAberta?.pending_transfer))}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Está com o escritório e é dela
+                  </p>
+                </div>
+                <div className="panel p-3">
+                  <p className="text-xs text-muted-foreground uppercase">Ainda vai receber</p>
+                  <p className="num mt-1 text-lg font-semibold">
+                    {money(resumoExtrato.faltaAcontecer)}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Do acordo, ninguém pagou ainda
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold">Recebimentos</h3>
+                {extrato!.receipts.length === 0 ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Nenhum recebimento registrado até agora.
+                  </p>
+                ) : (
+                  <div className="mt-2 overflow-x-auto rounded-md border border-border">
+                    <table className="w-full min-w-[34rem] text-sm">
+                      <thead className="bg-muted text-xs text-muted-foreground uppercase">
+                        <tr>
+                          <th className="p-2 text-left">Data</th>
+                          <th className="text-right">Valor do recebimento</th>
+                          <th className="text-right">Parte dela</th>
+                          <th className="p-2 text-right">Como ela recebeu</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {extrato!.receipts.map((r) => (
+                          <tr key={r.id} className="border-t border-border/60">
+                            <td className="p-2">{dateBR(r.received_on)}</td>
+                            <td className="num text-right">{money(r.total_amount)}</td>
+                            <td className="num text-right font-medium">
+                              {money(num(r.client_amount))}
+                            </td>
+                            <td className="p-2 text-right text-xs text-muted-foreground">
+                              {num(r.client_amount_received_direct) > 0.01 &&
+                              num(r.client_amount_received_by_firm) > 0.01
+                                ? "Parte direto, parte pelo escritório"
+                                : num(r.client_amount_received_direct) > 0.01
+                                  ? "Direto na conta dela"
+                                  : num(r.client_amount_received_by_firm) > 0.01
+                                    ? "Pela conta do escritório"
+                                    : "Sem parte dela"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold">Próximos vencimentos</h3>
+                {resumoExtrato.aVencer.length === 0 ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Não há parcela em aberto com valor dela.
+                  </p>
+                ) : (
+                  <div className="mt-2 overflow-x-auto rounded-md border border-border">
+                    <table className="w-full min-w-[34rem] text-sm">
+                      <thead className="bg-muted text-xs text-muted-foreground uppercase">
+                        <tr>
+                          <th className="p-2 text-left">Vencimento</th>
+                          <th className="text-left">Parcela</th>
+                          <th className="text-left">Situação</th>
+                          <th className="p-2 text-right">Parte dela a receber</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {resumoExtrato.aVencer.map((i) => (
+                          <tr key={i.id} className="border-t border-border/60">
+                            <td className="p-2">
+                              {i.due_date ? dateBR(i.due_date) : "a definir"}
+                            </td>
+                            <td>{i.label || "—"}</td>
+                            <td>
+                              <StatusBadge status={i.status} />
+                            </td>
+                            <td className="num p-2 text-right font-medium">
+                              {money(num(i.client_amount) - num(i.paid_client))}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDetalheDe(null)}>
+              Fechar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!payTarget} onOpenChange={(v) => !v && setPayTarget(null)}>
         <DialogContent>

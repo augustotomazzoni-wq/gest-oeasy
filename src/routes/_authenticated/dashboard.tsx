@@ -153,7 +153,7 @@ function usePeriodData(start: string, end: string) {
           .lte("received_on", end),
         supabase
           .from("financial_transactions")
-          .select("type, amount, paid_on, is_financing")
+          .select("type, amount, paid_on, is_financing, source_type")
           .eq("status", "pago")
           .gte("paid_on", start)
           .lte("paid_on", end),
@@ -341,9 +341,6 @@ function Dashboard() {
   // essas entradas sem descontar fazia a parte da cliente ser contada como
   // dinheiro do escritório, e ainda aparecer no rodapé como se fosse
   // empréstimo ou aporte.
-  const periodEntradas = (periodData?.txs ?? [])
-    .filter((t) => t.type === "entrada")
-    .reduce((s, t) => s + num(t.amount), 0);
   // Só desconta o dinheiro da cliente que veio grudado numa entrada do
   // escritório. Recebimento que é puro dinheiro de terceiro já entra no caixa
   // com o tipo "entrada_de_terceiros" e nunca foi somado acima — descontar
@@ -354,23 +351,30 @@ function Dashboard() {
         num(r.fee_amount) + num(r.success_fee_amount) + num(r.cost_reimbursement) > 0.01,
     )
     .reduce((s, r) => s + num(r.client_amount_received_by_firm), 0);
-  const periodCashIn = Math.max(periodEntradas - periodClientDentroDeEntrada, 0);
-
-  // De que esse total é feito. Sem isso ele é um número que ninguém consegue
-  // conferir: quem soma honorários com empréstimo não chega nele, porque toda
-  // entrada lançada à mão no caixa (ou vinda da importação) também está aqui.
-  const periodCostReimb = (periodData?.receipts ?? []).reduce(
-    (s, r) => s + num(r.cost_reimbursement),
+  // A composição sai das próprias linhas do caixa, e não de somar receita com
+  // empréstimo. Receita do escritório vem dos recebimentos; caixa vem dos
+  // lançamentos. Um recebimento antigo, importado sem valor em conta, conta
+  // como receita e nunca virou linha de caixa — misturar as duas origens dava
+  // uma composição que somava mais que o próprio total.
+  const entradasDoPeriodo = (periodData?.txs ?? []).filter((t) => t.type === "entrada");
+  const somar = (rows: typeof entradasDoPeriodo) =>
+    rows.reduce((s, t) => s + num(t.amount), 0);
+  const entradasDeParcelasBruto = somar(
+    entradasDoPeriodo.filter((t) => !t.is_financing && t.source_type === "receipt"),
+  );
+  const outrasEntradas = somar(
+    entradasDoPeriodo.filter((t) => !t.is_financing && t.source_type !== "receipt"),
+  );
+  // O que sobra do escritório nas baixas: tira a parte da cliente que veio
+  // junto no mesmo depósito.
+  const entradasDeParcelas = Math.max(
+    entradasDeParcelasBruto - periodClientDentroDeEntrada,
     0,
   );
-  // As entradas que nasceram de baixa de parcela valem o que caiu na conta:
-  // honorários, sucumbência, reembolso de custas e a parte da cliente junto.
-  const entradasDeParcelas =
-    periodFirmRevenue + periodCostReimb + periodClientDentroDeEntrada;
-  const outrasEntradas = Math.max(
-    periodEntradas - periodFinancingIn - entradasDeParcelas,
-    0,
-  );
+  const periodCashIn = entradasDeParcelas + periodFinancingIn + outrasEntradas;
+  // Honorários que contam como receita mas não entraram na conta no período —
+  // é o que explica a receita ser maior que o caixa.
+  const receitaForaDoCaixa = Math.max(periodFirmRevenue - entradasDeParcelas, 0);
   const periodProfit = periodFirmRevenue - periodExpenses;
   // O `?? []` não é paranoia: no preview, o React Query guarda em memória o
   // resultado da versão anterior do código. Ao trocar o módulo a quente depois
@@ -657,15 +661,9 @@ function Dashboard() {
                 o total, e um número que não se confere não se usa. */}
             <ul className="mt-2 flex flex-col gap-0.5 text-xs text-muted-foreground">
               <li className="flex justify-between gap-2">
-                <span>Honorários + sucumbência</span>
-                <span className="num">{money(periodFirmRevenue)}</span>
+                <span>Baixas de parcela, sem a parte da cliente</span>
+                <span className="num">{money(entradasDeParcelas)}</span>
               </li>
-              {periodCostReimb > 0.01 && (
-                <li className="flex justify-between gap-2">
-                  <span>Reembolso de custas</span>
-                  <span className="num">{money(periodCostReimb)}</span>
-                </li>
-              )}
               {periodFinancingIn > 0.01 && (
                 <li className="flex justify-between gap-2">
                   <span>Empréstimos e aportes</span>
@@ -687,6 +685,14 @@ function Dashboard() {
                   Fluxo de Caixa
                 </Link>{" "}
                 com o filtro “Só receitas”.
+              </p>
+            )}
+            {receitaForaDoCaixa > 0.01 && (
+              <p className="mt-2 text-xs text-warning">
+                <strong className="num">{money(receitaForaDoCaixa)}</strong> de honorários contam
+                como receita do período mas não entraram na conta: são recebimentos sem valor em
+                conta do escritório — normalmente os que vieram da importação, já recebidos antes
+                de o sistema existir.
               </p>
             )}
             <p className="mt-2 text-xs text-muted-foreground">
