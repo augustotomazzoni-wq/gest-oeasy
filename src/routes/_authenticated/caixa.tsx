@@ -144,6 +144,9 @@ function CaixaPage() {
   const [customStart, setCustomStart] = useState(today.slice(0, 8) + "01");
   const [customEnd, setCustomEnd] = useState(today);
   const [view, setView] = useState<"todos" | "pago" | "previsto">("todos");
+  // Filtro de tipo, que se combina com o de situação acima: dá para ver "só
+  // despesas ainda a pagar" marcando um de cada.
+  const [kind, setKind] = useState<"todos" | "receitas" | "despesas">("todos");
   const [payTarget, setPayTarget] = useState<TxRow | null>(null);
   const [payDate, setPayDate] = useState(today);
   const [deleteTarget, setDeleteTarget] = useState<TxRow | null>(null);
@@ -199,12 +202,21 @@ function CaixaPage() {
 
   const rows = useMemo(() => {
     const all = data?.transactions ?? [];
-    const filtered =
+    const porSituacao =
       view === "todos"
         ? all
         : all.filter((t) => (view === "pago" ? t.status === "pago" : t.status !== "pago"));
+    // Receita é tudo que entrou, despesa é tudo que saiu — empréstimo incluído,
+    // para nenhuma linha do caixa sumir quando se filtra. Os cards acima é que
+    // deixam o empréstimo de fora, porque ali a pergunta é o resultado.
+    const filtered =
+      kind === "todos"
+        ? porSituacao
+        : porSituacao.filter((t) =>
+            kind === "receitas" ? t.type === "entrada" : t.type === "saida",
+          );
     return [...filtered].sort((a, b) => refDate(b).localeCompare(refDate(a)));
-  }, [data, view]);
+  }, [data, view, kind]);
 
   const totals = useMemo(() => {
     const t = { in: 0, out: 0, thirdIn: 0, thirdOut: 0, aPagar: 0, aReceber: 0, finIn: 0, finOut: 0 };
@@ -469,6 +481,32 @@ function CaixaPage() {
               {label}
             </Button>
           ))}
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {(
+            [
+              ["todos", "Tudo"],
+              ["receitas", "Só receitas"],
+              ["despesas", "Só despesas"],
+            ] as const
+          ).map(([key, label]) => (
+            <Button
+              key={key}
+              size="sm"
+              variant={kind === key ? "default" : "outline"}
+              onClick={() => setKind(key)}
+            >
+              {label}
+            </Button>
+          ))}
+          {kind !== "todos" && (
+            <span className="text-xs text-muted-foreground">
+              Os dois filtros se somam — {kind === "receitas" ? "receitas" : "despesas"}
+              {view === "pago" ? " já pagas" : view === "previsto" ? " ainda em aberto" : ""}.
+              Repasses e transferências entre contas só aparecem em “Tudo”.
+            </span>
+          )}
         </div>
       </div>
 
