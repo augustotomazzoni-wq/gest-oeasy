@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ClienteLink } from "@/components/ClienteDetalhe";
 import { useAuth } from "@/hooks/useAuth";
 import {
   money,
@@ -211,6 +212,38 @@ function parcelasDoEscritorio(opts: {
   }
   return rows;
 }
+
+type AndamentoDoAcordo = "concluido" | "atrasado" | "em_andamento" | "sem_cronograma";
+
+/**
+ * Em que pé está o acordo, olhando só as parcelas dele.
+ *
+ * É outra coisa da situação escolhida no cadastro: aqui não importa se alguém
+ * marcou "confirmado" ou "em pagamento", importa se o dinheiro andou.
+ *
+ * - concluído: ninguém mais tem nada a receber, nem a cliente nem o escritório
+ * - atrasado: passou a data de alguma parcela e a baixa não foi feita
+ * - em andamento: ainda há parcela a vencer
+ */
+function andamentoDoAcordo(parcelas: { balance: number; status: string }[]): AndamentoDoAcordo {
+  if (parcelas.length === 0) return "sem_cronograma";
+  if (parcelas.some((p) => p.status === "ATRASADA" && num(p.balance) > 0.01)) return "atrasado";
+  const emAberto = parcelas.reduce(
+    (total, p) => (p.status === "CANCELADA" ? total : total + Math.max(num(p.balance), 0)),
+    0,
+  );
+  return emAberto <= 0.01 ? "concluido" : "em_andamento";
+}
+
+const ANDAMENTO_VISUAL: Record<
+  AndamentoDoAcordo,
+  { label: string; tone: "success" | "warning" | "danger" | "neutral" }
+> = {
+  concluido: { label: "Concluído", tone: "success" },
+  atrasado: { label: "Atrasado", tone: "danger" },
+  em_andamento: { label: "Em andamento", tone: "warning" },
+  sem_cronograma: { label: "Sem cronograma", tone: "neutral" },
+};
 
 /** "faltam R$ 0,02" / "sobram R$ 0,05" — o que o usuário precisa saber. */
 function faltaOuSobra(atual: number, alvo: number): string {
@@ -491,7 +524,9 @@ function AcordosPage() {
           .from("cases")
           .select("id, client_id, case_number, opposing_party")
           .is("deleted_at", null),
-        supabase.from("v_installments").select("receivable_id, gross_amount, paid_total"),
+        supabase
+          .from("v_installments")
+          .select("receivable_id, gross_amount, paid_total, balance, due_date, status"),
       ]);
       if (recv.error) throw recv.error;
       return {
@@ -502,6 +537,9 @@ function AcordosPage() {
           receivable_id: string;
           gross_amount: number;
           paid_total: number;
+          balance: number;
+          due_date: string | null;
+          status: string;
         }[],
       };
     },
@@ -2167,15 +2205,19 @@ function AcordosPage() {
                 num(r.expected_firm_amount) +
                 num(r.expected_client_amount) +
                 num(r.cost_reimbursement);
-              const paid = (data?.installments ?? [])
-                .filter((i) => i.receivable_id === r.id)
-                .reduce((s, i) => s + num(i.paid_total), 0);
+              const parcelasDoAcordo = (data?.installments ?? []).filter(
+                (i) => i.receivable_id === r.id,
+              );
+              const paid = parcelasDoAcordo.reduce((s, i) => s + num(i.paid_total), 0);
+              const andamento = andamentoDoAcordo(parcelasDoAcordo);
               return (
                 <tr key={r.id} className="border-b border-border/60 last:border-0">
                   <td className="p-3">
-                    <span className="font-medium">
-                      {(r.clients as { name: string } | null)?.name ?? "—"}
-                    </span>
+                    <ClienteLink
+                      clientId={r.client_id as string | null}
+                      name={(r.clients as { name: string } | null)?.name}
+                      className="font-medium"
+                    />
                     {r.description && (
                       <span className="block text-xs text-muted-foreground">{r.description}</span>
                     )}
@@ -2183,6 +2225,14 @@ function AcordosPage() {
                   <td>{RECEIVABLE_TYPE_LABEL[r.type] ?? r.type}</td>
                   <td>
                     <div className="flex flex-wrap gap-1">
+                      {/* O andamento vem primeiro porque é o que se procura
+                          na lista: o pagamento acabou ou não. A situação do
+                          cadastro fica ao lado, para quem precisa dela. */}
+                      {r.status !== "cancelado" && (
+                        <Tag tone={ANDAMENTO_VISUAL[andamento].tone}>
+                          {ANDAMENTO_VISUAL[andamento].label}
+                        </Tag>
+                      )}
                       <ReceivableStatusTag status={r.status} />
                       {r.is_estimated && <Tag tone="warning">Estimado</Tag>}
                     </div>

@@ -23,6 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ClienteLink } from "@/components/ClienteDetalhe";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, daysBetween } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
@@ -675,7 +676,10 @@ function ParcelasPage() {
             {rows.map((r) => (
               <tr key={r.id} className="border-b border-border/60 last:border-0">
                 <td className="p-3 font-medium">
-                  {(r.client_id && data?.clientMap.get(r.client_id)) || "—"}
+                  <ClienteLink
+                    clientId={r.client_id}
+                    name={r.client_id ? data?.clientMap.get(r.client_id) : null}
+                  />
                   {r.stream === "sucumbencia" && (
                     <span className="block text-xs text-info">sucumbência — paga direto</span>
                   )}
