@@ -1077,15 +1077,10 @@ function AcordosPage() {
   // por fluxo ou por já ter sacado — não entra no cronograma.
   const clienteForaNaEdicao =
     editForm.flow === "cliente_recebe_direto" || editForm.flow === "recebimento_dividido";
+  const recebidoDiretoNaEdicao = num(Number(editForm.fee_base_extra_amount));
   const clienteNoCronogramaNaEdicao = clienteForaNaEdicao
     ? 0
-    : Math.max(
-        round2(
-          num(Number(editForm.expected_client_amount)) -
-            num(Number(editForm.fee_base_extra_amount)),
-        ),
-        0,
-      );
+    : Math.max(round2(num(Number(editForm.expected_client_amount)) - recebidoDiretoNaEdicao), 0);
   const totalEsperadoNaEdicao = round2(
     num(Number(editForm.expected_firm_amount)) +
       clienteNoCronogramaNaEdicao +
@@ -2710,12 +2705,50 @@ function AcordosPage() {
               )}
 
               {editSchedule.length > 0 && divergenciaDoCronograma > 0.01 && (
+                <div className="space-y-2 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
+                  <p>
+                    As parcelas somam {money(totaisDoCronograma.gross)} e o acordo espera receber{" "}
+                    {money(totalEsperadoNaEdicao)} —{" "}
+                    {faltaOuSobra(totaisDoCronograma.gross, totalEsperadoNaEdicao)} no cronograma.
+                  </p>
+                  {/* Causa quase certa quando a diferença é justamente o FGTS:
+                      parcelas geradas antes de o campo existir cobram da
+                      cliente um dinheiro que ela já tinha sacado. */}
+                  {recebidoDiretoNaEdicao > 0.01 &&
+                    Math.abs(divergenciaDoCronograma - recebidoDiretoNaEdicao) < 1 && (
+                      <p>
+                        A diferença é justamente o que a cliente recebeu direto (
+                        {money(recebidoDiretoNaEdicao)}). Se estas parcelas foram criadas antes
+                        desse campo, elas ainda cobram dela um dinheiro que já está na conta dela:
+                        baixe a parte da cliente nas parcelas, ou zere o campo se ele não se
+                        aplica a este acordo.
+                      </p>
+                    )}
+                  <p className="text-muted-foreground">
+                    Dá para salvar assim, mas os relatórios vão mostrar a diferença.
+                  </p>
+                </div>
+              )}
+
+              {/* Parcela em que o total não bate com as próprias partes, quase
+                  sempre arredondamento antigo. Mexer na linha já a fecha. */}
+              {Math.abs(
+                round2(
+                  totaisDoCronograma.firm + totaisDoCronograma.client + totaisDoCronograma.costs,
+                ) - totaisDoCronograma.gross,
+              ) > 0.01 && (
                 <p className="rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
-                  As parcelas somam {money(totaisDoCronograma.gross)} e o acordo espera receber{" "}
-                  {money(totalEsperadoNaEdicao)} —{" "}
-                  {faltaOuSobra(totaisDoCronograma.gross, totalEsperadoNaEdicao)} no cronograma.
-                  Dá para salvar assim, mas os relatórios vão mostrar a diferença: ajuste as
-                  parcelas ou os valores esperados acima.
+                  Em alguma parcela o total não bate com escritório + cliente + reembolso: as
+                  colunas somam{" "}
+                  {money(
+                    round2(
+                      totaisDoCronograma.firm +
+                        totaisDoCronograma.client +
+                        totaisDoCronograma.costs,
+                    ),
+                  )}{" "}
+                  e os totais somam {money(totaisDoCronograma.gross)}. Basta mexer na parcela
+                  torta que ela se fecha sozinha.
                 </p>
               )}
 
