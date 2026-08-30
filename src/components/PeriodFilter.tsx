@@ -67,13 +67,40 @@ export function PeriodFilter({
           >
             ‹
           </Button>
-          <Input
-            type="date"
-            className="w-40"
-            aria-label="Data de referência do período"
-            value={anchor}
-            onChange={(e) => onAnchorChange(e.target.value || anchor)}
-          />
+          {/* O campo acompanha o recorte escolhido. Com "Mês" selecionado, um
+              seletor de dia fazia parecer que as setas andavam um dia de cada
+              vez — elas sempre andaram um mês, mas a tela dizia outra coisa.
+              Ancorar no dia 1º também evita a deriva de quem começa em 31/03,
+              volta para 28/02 e não consegue mais voltar ao dia 31. */}
+          {type === "mes" ? (
+            <Input
+              type="month"
+              className="w-40"
+              aria-label="Mês de referência"
+              value={anchor.slice(0, 7)}
+              onChange={(e) => onAnchorChange(e.target.value ? `${e.target.value}-01` : anchor)}
+            />
+          ) : type === "ano" ? (
+            <Input
+              type="number"
+              className="w-28"
+              aria-label="Ano de referência"
+              min="2000"
+              max="2100"
+              value={anchor.slice(0, 4)}
+              onChange={(e) =>
+                onAnchorChange(e.target.value.length === 4 ? `${e.target.value}-01-01` : anchor)
+              }
+            />
+          ) : (
+            <Input
+              type="date"
+              className="w-40"
+              aria-label="Data de referência do período"
+              value={anchor}
+              onChange={(e) => onAnchorChange(e.target.value || anchor)}
+            />
+          )}
           <Button
             size="sm"
             variant="outline"

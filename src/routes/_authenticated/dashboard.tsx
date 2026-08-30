@@ -73,13 +73,14 @@ type InstallmentRow = {
   status: string;
   is_estimated: boolean;
   receivable_id: string;
+  client_id: string | null;
 };
 
 function useDashboardData() {
   return useQuery({
     queryKey: ["dashboard"],
     queryFn: async () => {
-      const [inst, balances, banks, txs, receivables, allCases, receipts] =
+      const [inst, balances, banks, txs, receivables, allCases, clients, receipts] =
         await Promise.all([
         supabase.from("v_installments").select("*"),
         supabase.from("v_client_balances").select("*"),
@@ -101,6 +102,7 @@ function useDashboardData() {
           .from("cases")
           .select("id, practice_area, status")
           .is("deleted_at", null),
+        supabase.from("clients").select("id, name").is("deleted_at", null),
         // O dinheiro de terceiros precisa vir do recebimento, não da parcela:
         // a parcela só sabe quanto é da cliente, não se passou pela conta do
         // escritório ou se ela recebeu direto da empresa.
@@ -123,6 +125,7 @@ function useDashboardData() {
           practice_area: string | null;
           status: string;
         }[],
+        clients: (clients.data ?? []) as { id: string; name: string }[],
         receipts: receipts.data ?? [],
       };
     },
@@ -256,7 +259,10 @@ function Dashboard() {
   // não ter que reescolher "Trabalhista" toda vez que abrir o dashboard.
   const [area, setArea] = useState(() => {
     try {
-      return localStorage.getItem("dashboard-area") ?? "";
+      // Só dois valores valem hoje. Qualquer coisa guardada por uma versão
+      // anterior deste filtro vira "Todas" em vez de deixar a tela num estado
+      // em que nenhum botão aparece marcado.
+      return localStorage.getItem("dashboard-area") === "trabalhista" ? "trabalhista" : "";
     } catch {
       return "";
     }
@@ -358,16 +364,24 @@ function Dashboard() {
   // de acrescentar um campo nesta consulta, o componente renderiza uma vez com
   // o objeto antigo, em que o campo ainda não existe — e a tela cai inteira.
   const casos = d.cases ?? [];
+  const nomePorCliente = new Map((d.clients ?? []).map((c) => [c.id, c.name]));
+  const nomeDoCliente = (id: string | null | undefined) =>
+    (id && nomePorCliente.get(id)) || "—";
   const activeCases = casos.filter((c) => c.status === "ativo").length;
   const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
 
-  // Área do direito de cada processo, para separar trabalhista de cível.
-  const areaDoCaso = new Map(casos.map((c) => [c.id, (c.practice_area ?? "").trim()]));
-  const areasDisponiveis = [...new Set([...areaDoCaso.values()].filter(Boolean))].sort((a, b) =>
-    a.localeCompare(b, "pt-BR"),
-  );
+  // O escritório é de trabalhista: o cível é a exceção, e são pouquíssimos
+  // casos. Por isso a regra é pela negativa — trabalhista é tudo que não está
+  // marcado como cível, inclusive acordo sem processo vinculado ou com a área
+  // em branco. Assim ninguém precisa marcar nada no caso comum, e um processo
+  // novo entra certo por padrão.
+  const ehCivel = (texto: string | null | undefined) => {
+    const t = (texto ?? "").toLowerCase();
+    return t.includes("civ") || t.includes("cív");
+  };
+  const casosCiveis = new Set(casos.filter((c) => ehCivel(c.practice_area)).map((c) => c.id));
   const naArea = (caseId: string | null | undefined) =>
-    !area || (!!caseId && areaDoCaso.get(caseId) === area);
+    area !== "trabalhista" || !caseId || !casosCiveis.has(caseId);
 
   // Quantos clientes distintos efetivamente pagaram alguma coisa no período —
   // é a base tanto do custo por cliente quanto da receita média por cliente.
@@ -417,13 +431,14 @@ function Dashboard() {
     clientesComResultado > 0 ? aReceberComResultado / clientesComResultado : 0;
   const mediaBrutoPorCliente =
     clientesComResultado > 0 ? brutoComResultado / clientesComResultado : 0;
-  // Acordo sem processo vinculado não tem área: fica de fora quando se filtra,
-  // e quem lê precisa saber disso para não achar que sumiu dinheiro.
-  const semAreaDefinida = d.receivables.filter(
+  // Quantos casos o filtro está deixando de fora, para o número não sumir sem
+  // explicação de uma tela para a outra.
+  const civeisForaDaConta = d.receivables.filter(
     (r) =>
       (r.type === "acordo" || r.type === "sentenca") &&
       r.status !== "cancelado" &&
-      !areaDoCaso.get((r.case_id as string) ?? ""),
+      !!r.case_id &&
+      casosCiveis.has(r.case_id as string),
   ).length;
 
   const totalBank = d.banks.reduce((s, b) => s + num(b.balance as number), 0);
@@ -480,6 +495,13 @@ function Dashboard() {
   );
   const mixThird = (mixData ?? []).reduce(
     (s, r) => s + num(r.client_amount_received_by_firm as number),
+    0,
+  );
+  // O que a cliente recebeu direto da empresa. Estava sendo buscado e nunca
+  // mostrado: o gráfico só tinha o dinheiro que passou pela nossa conta, o que
+  // fazia as clientes parecerem receber muito menos do que de fato receberam.
+  const mixDirect = (mixData ?? []).reduce(
+    (s, r) => s + num(r.client_amount_received_direct as number),
     0,
   );
 
@@ -652,37 +674,28 @@ function Dashboard() {
           </div>
         </div>
 
-        {/* Filtro de área: o que separa a trabalhista do cível nas médias. */}
-        {areasDisponiveis.length > 0 && (
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground uppercase">Área do direito</span>
+        {/* Duas opções só: o escritório é de trabalhista, e o cível é a
+            exceção que se quer tirar da conta. */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground uppercase">Área do direito</span>
+          {[
+            ["", "Todas"],
+            ["trabalhista", "Trabalhista"],
+          ].map(([valor, rotulo]) => (
             <button
+              key={valor}
               type="button"
-              onClick={() => escolherArea("")}
+              onClick={() => escolherArea(valor!)}
               className={`rounded-md border px-3 py-1 text-xs ${
-                area === ""
+                area === valor
                   ? "border-primary bg-primary/10 text-foreground"
                   : "border-border text-muted-foreground"
               }`}
             >
-              Todas
+              {rotulo}
             </button>
-            {areasDisponiveis.map((a) => (
-              <button
-                key={a}
-                type="button"
-                onClick={() => escolherArea(a)}
-                className={`rounded-md border px-3 py-1 text-xs ${
-                  area === a
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "border-border text-muted-foreground"
-                }`}
-              >
-                {a}
-              </button>
-            ))}
-          </div>
-        )}
+          ))}
+        </div>
 
         {/* Ações com resultado: é aqui que mora a média por cliente que
             interessa — só o que já virou acordo ou sentença. */}
@@ -691,7 +704,7 @@ function Dashboard() {
             <p className="text-xs text-muted-foreground uppercase">Clientes com resultado</p>
             <p className="num mt-1 text-xl font-semibold">{clientesComResultado}</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {area ? `Acordo ou sentença em ${area}` : "Com acordo ou sentença"}
+              {area ? "Acordo ou sentença na trabalhista" : "Com acordo ou sentença"}
             </p>
           </div>
           <div className="panel p-4">
@@ -723,11 +736,11 @@ function Dashboard() {
           </div>
         </div>
 
-        {area && semAreaDefinida > 0 && (
+        {area && civeisForaDaConta > 0 && (
           <div className="mt-3 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
-            {semAreaDefinida} acordo(s)/sentença(s) estão fora desta conta por não ter processo
-            vinculado com área preenchida. Para entrarem, ligue o acordo a um processo em Acordos e
-            preencha a área do direito dele em Processos.
+            {civeisForaDaConta} acordo(s)/sentença(s) de cível estão fora desta conta. Tudo o mais
+            conta como trabalhista, inclusive acordo sem processo vinculado — para tirar um caso
+            daqui, marque a área do processo como Cível em Processos.
           </div>
         )}
 
@@ -739,7 +752,7 @@ function Dashboard() {
             <p className="num mt-1 text-xl font-semibold">{periodLoading ? "…" : payingCount}</p>
             <p className="mt-1 text-xs text-muted-foreground">
               Clientes distintos com recebimento no período
-              {area ? `, em ${area}` : ""}
+              {area ? ", na trabalhista" : ""}
             </p>
           </div>
           {/* Despesa do escritório não se divide por área do direito, então
@@ -762,7 +775,7 @@ function Dashboard() {
               {periodLoading ? "…" : payingCount > 0 ? money(revenuePerClient) : "—"}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {area ? `Receita em ${area}` : "Receita do escritório"} ÷ clientes que pagaram
+              {area ? "Receita da trabalhista" : "Receita do escritório"} ÷ clientes que pagaram
             </p>
           </div>
           {!area && (
@@ -951,7 +964,8 @@ function Dashboard() {
               <BarChart
                 data={[
                   { nome: "Escritório", valor: mixFirm },
-                  { nome: "Terceiros (clientes)", valor: mixThird },
+                  { nome: "Clientes — pela nossa conta", valor: mixThird },
+                  { nome: "Clientes — direto", valor: mixDirect },
                 ]}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
@@ -965,7 +979,9 @@ function Dashboard() {
           <p className="mt-2 text-xs text-muted-foreground">
             {mixLoading
               ? "Carregando…"
-              : "Terceiros conta só o que passou pela conta do escritório e ainda vai para repasse."}
+              : `As clientes receberam ${money(mixThird + mixDirect)} no período: ` +
+                `${money(mixThird)} passaram pela conta do escritório e viram repasse, e ` +
+                `${money(mixDirect)} caíram direto na conta delas, sem passar por aqui.`}
           </p>
         </div>
 
@@ -993,6 +1009,7 @@ function Dashboard() {
           <thead>
             <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
               <th className="py-2">Vencimento</th>
+              <th>Cliente</th>
               <th>Situação</th>
               <th className="text-right">Saldo</th>
             </tr>
@@ -1004,6 +1021,7 @@ function Dashboard() {
               .map((i) => (
                 <tr key={i.id} className="border-b border-border/60 last:border-0">
                   <td className="py-2">{dateBR(i.due_date)}</td>
+                  <td className="font-medium">{nomeDoCliente(i.client_id)}</td>
                   <td>
                     <StatusBadge status={i.status} />
                   </td>
@@ -1012,7 +1030,7 @@ function Dashboard() {
               ))}
             {next30.length === 0 && (
               <tr>
-                <td colSpan={3} className="py-4 text-center text-muted-foreground">
+                <td colSpan={4} className="py-4 text-center text-muted-foreground">
                   Nenhum vencimento nos próximos 30 dias.
                 </td>
               </tr>

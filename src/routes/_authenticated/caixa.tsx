@@ -474,8 +474,12 @@ function CaixaPage() {
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
         <div className="panel p-4">
-          <p className="text-xs text-muted-foreground uppercase">Receitas do escritório</p>
+          <p className="text-xs text-muted-foreground uppercase">Entradas na conta</p>
           <p className="num mt-1 text-xl font-semibold text-success">{money(totals.in)}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Sem empréstimo. Não é o mesmo que honorários: um depósito misto entra aqui pelo valor
+            cheio, com a parte da cliente dentro.
+          </p>
         </div>
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">Despesas pagas</p>
