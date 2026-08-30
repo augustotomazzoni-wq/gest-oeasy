@@ -119,6 +119,8 @@ type TxRow = {
   is_financing: boolean | null;
   bank_accounts: { name: string } | null;
   categories: { name: string } | null;
+  /** Preenchido nos lançamentos que nasceram de uma baixa ou de um repasse. */
+  clients: { name: string } | null;
 };
 
 /** A data que vale para o lançamento: pagamento quando pago, vencimento quando previsto. */
@@ -166,14 +168,14 @@ function CaixaPage() {
       const [pagas, previstas, banks, cats, balances] = await Promise.all([
         supabase
           .from("financial_transactions")
-          .select("*, bank_accounts(name), categories(name)")
+          .select("*, bank_accounts(name), categories(name), clients(name)")
           .eq("status", "pago")
           .gte("paid_on", start)
           .lte("paid_on", end)
           .order("paid_on", { ascending: false }),
         supabase
           .from("financial_transactions")
-          .select("*, bank_accounts(name), categories(name)")
+          .select("*, bank_accounts(name), categories(name), clients(name)")
           .eq("status", "previsto")
           .gte("due_date", start)
           .lte("due_date", end)
@@ -515,8 +517,8 @@ function CaixaPage() {
           <p className="text-xs text-muted-foreground uppercase">Entradas na conta</p>
           <p className="num mt-1 text-xl font-semibold text-success">{money(totals.in)}</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Sem empréstimo. Não é o mesmo que honorários: um depósito misto entra aqui pelo valor
-            cheio, com a parte da cliente dentro.
+            Sem empréstimo e sem dinheiro de cliente, que tem linha própria. Além dos honorários,
+            inclui o que foi lançado à mão aqui.
           </p>
         </div>
         <div className="panel p-4">
@@ -591,6 +593,13 @@ function CaixaPage() {
                   </td>
                   <td>
                     <span className="font-medium">{t.description}</span>
+                    {/* De quem é a parcela. Sem isto a linha mostrava o valor e
+                        deixava quem lê adivinhar de qual cliente veio. */}
+                    {t.clients?.name && (
+                      <span className="block text-xs font-medium text-info">
+                        {t.clients.name}
+                      </span>
+                    )}
                     {t.categories?.name && (
                       <span className="block text-xs text-muted-foreground">
                         {t.categories.name}

@@ -335,41 +335,27 @@ function Dashboard() {
   // sucumbência somados a empréstimos, aportes de sócio e qualquer outra
   // entrada lançada no caixa.
   //
-  // O desconto do dinheiro das clientes no fim é o que conserta o indicador.
-  // Num recebimento misto — parte honorário, parte da cliente — o caixa
-  // registra o valor cheio que caiu na conta, com o tipo "entrada". Somar
-  // essas entradas sem descontar fazia a parte da cliente ser contada como
-  // dinheiro do escritório, e ainda aparecer no rodapé como se fosse
-  // empréstimo ou aporte.
-  // Só desconta o dinheiro da cliente que veio grudado numa entrada do
-  // escritório. Recebimento que é puro dinheiro de terceiro já entra no caixa
-  // com o tipo "entrada_de_terceiros" e nunca foi somado acima — descontar
-  // esse também tiraria duas vezes.
-  const periodClientDentroDeEntrada = (periodData?.receipts ?? [])
-    .filter(
-      (r) =>
-        num(r.fee_amount) + num(r.success_fee_amount) + num(r.cost_reimbursement) > 0.01,
-    )
-    .reduce((s, r) => s + num(r.client_amount_received_by_firm), 0);
-  // A composição sai das próprias linhas do caixa, e não de somar receita com
-  // empréstimo. Receita do escritório vem dos recebimentos; caixa vem dos
-  // lançamentos. Um recebimento antigo, importado sem valor em conta, conta
-  // como receita e nunca virou linha de caixa — misturar as duas origens dava
-  // uma composição que somava mais que o próprio total.
+  // Não há nada de cliente a descontar daqui. Uma baixa de parcela gera duas
+  // linhas separadas no caixa: uma `entrada` só com a parte do escritório e uma
+  // `entrada_de_terceiros` com a parte da cliente. Este indicador só soma as
+  // do primeiro tipo.
+  //
+  // Antes o caixa registrava as duas juntas numa linha só, e aqui havia um
+  // desconto para tirar a parte da cliente. Quando as linhas foram separadas,
+  // o desconto ficou — passou a tirar um dinheiro que já não estava sendo
+  // somado, e o total vinha menor que a própria receita de honorários.
+  //
+  // A composição sai das linhas do caixa, e não de somar receita com
+  // empréstimo: receita vem dos recebimentos, caixa vem dos lançamentos, e
+  // misturar as duas origens dava uma composição que não fechava com o total.
   const entradasDoPeriodo = (periodData?.txs ?? []).filter((t) => t.type === "entrada");
   const somar = (rows: typeof entradasDoPeriodo) =>
     rows.reduce((s, t) => s + num(t.amount), 0);
-  const entradasDeParcelasBruto = somar(
+  const entradasDeParcelas = somar(
     entradasDoPeriodo.filter((t) => !t.is_financing && t.source_type === "receipt"),
   );
   const outrasEntradas = somar(
     entradasDoPeriodo.filter((t) => !t.is_financing && t.source_type !== "receipt"),
-  );
-  // O que sobra do escritório nas baixas: tira a parte da cliente que veio
-  // junto no mesmo depósito.
-  const entradasDeParcelas = Math.max(
-    entradasDeParcelasBruto - periodClientDentroDeEntrada,
-    0,
   );
   const periodCashIn = entradasDeParcelas + periodFinancingIn + outrasEntradas;
   // Honorários que contam como receita mas não entraram na conta no período —
@@ -696,7 +682,7 @@ function Dashboard() {
               </p>
             )}
             <p className="mt-2 text-xs text-muted-foreground">
-              Não entra aqui o dinheiro das clientes que veio junto numa baixa de parcela. Um
+              O dinheiro das clientes entra no caixa em linha própria e não é somado aqui. Um
               lançamento manual que seja de cliente, porém, o sistema não tem como reconhecer.
             </p>
           </div>
