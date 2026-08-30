@@ -36,7 +36,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/useAuth";
 import { maskAccount, maskTaxId, money, num, todayISO } from "@/lib/format";
-import { friendlyError } from "@/lib/errors";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
 import { downloadXlsx } from "@/lib/export-xlsx";
 import {
@@ -203,7 +203,7 @@ function ClientesPage() {
             "client_id, pix_key_type, pix_key, bank, branch, account, holder_name, holder_tax_id",
           ),
       ]);
-      if (clients.error) throw clients.error;
+      throwFirstError(clients, balances, paymentAccounts);
       return {
         clients: clients.data ?? [],
         balances: balances.data ?? [],

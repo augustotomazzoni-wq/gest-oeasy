@@ -67,3 +67,18 @@ export function friendlyError(e: unknown): string {
 
   return "Não foi possível concluir a ação. Tente novamente ou avise o suporte técnico.";
 }
+
+/**
+ * Levanta o primeiro erro de um conjunto de consultas feitas em paralelo.
+ *
+ * As telas disparam de quatro a sete consultas num `Promise.all` e quase
+ * sempre conferiam o erro de uma só. Quando outra falhava, ela virava lista
+ * vazia em silêncio: a tela abria com números errados ou seções vazias, sem
+ * nada indicando que faltou dado. Foi assim que uma coluna que não existia numa
+ * view apareceu como "este acordo não tem parcelas".
+ */
+export function throwFirstError(...results: { error: unknown }[]): void {
+  for (const result of results) {
+    if (result.error) throw result.error;
+  }
+}

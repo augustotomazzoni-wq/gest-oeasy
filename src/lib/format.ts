@@ -185,3 +185,8 @@ export const PAYMENT_METHODS_OUT = [
   "boleto",
   "outro",
 ] as const;
+
+/** Arredonda para centavos. O dinheiro do sistema inteiro passa por aqui. */
+export function round2(value: number | string | null | undefined): number {
+  return Math.round(num(value) * 100) / 100;
+}

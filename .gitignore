@@ -30,3 +30,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Variáveis de ambiente
+# O .env atual só tem chaves públicas (a publishable do Supabase), mas basta
+# alguém colar a service_role aqui para ela ir parar no repositório.
+.env.local
+.env.*.local

@@ -34,7 +34,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, addMonthsISO } from "@/lib/format";
-import { friendlyError } from "@/lib/errors";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
 import { downloadXlsxSheets } from "@/lib/export-xlsx";
 import { parseLoanWorkbook, loanTemplateRows } from "@/lib/loan-import";
@@ -166,7 +166,7 @@ function EmprestimosPage() {
           .eq("type", "despesa")
           .order("name"),
       ]);
-      if (loans.error) throw loans.error;
+      throwFirstError(loans, txs, banks, cats);
       return {
         loans: (loans.data ?? []) as unknown as LoanRow[],
         txs: (txs.data ?? []) as unknown as ParcelaTx[],

@@ -30,13 +30,14 @@ import { useAuth } from "@/hooks/useAuth";
 import {
   money,
   num,
+  round2,
   todayISO,
   addMonthsISO,
   RECEIVABLE_TYPE_LABEL,
   RECEIVABLE_STATUS_LABEL,
   FLOW_LABEL,
 } from "@/lib/format";
-import { friendlyError } from "@/lib/errors";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -171,7 +172,6 @@ function ajustarCentavos(rows: ScheduleRow[]): ScheduleRow[] {
   });
 }
 
-const round2 = (value: number) => Math.round(num(value) * 100) / 100;
 
 /**
  * Bloco de parcelas que é inteiro do escritório, com datas próprias.
@@ -528,7 +528,7 @@ function AcordosPage() {
           .from("v_installments")
           .select("receivable_id, gross_amount, paid_total, balance, due_date, status"),
       ]);
-      if (recv.error) throw recv.error;
+      throwFirstError(recv, clients, cases, inst);
       return {
         receivables: recv.data ?? [],
         clients: clients.data ?? [],

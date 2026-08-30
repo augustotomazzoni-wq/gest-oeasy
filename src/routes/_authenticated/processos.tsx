@@ -34,7 +34,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/useAuth";
-import { friendlyError } from "@/lib/errors";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import {
   ALL_FIELDS,
   FieldFilter,
@@ -144,7 +144,7 @@ function ProcessosPage() {
           .order("created_at", { ascending: false }),
         supabase.from("clients").select("id, name").is("deleted_at", null).order("name"),
       ]);
-      if (cases.error) throw cases.error;
+      throwFirstError(cases, clients);
       return { cases: cases.data ?? [], clients: clients.data ?? [] };
     },
   });

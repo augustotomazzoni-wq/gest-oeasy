@@ -28,7 +28,7 @@ import { ClienteLink } from "@/components/ClienteDetalhe";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, TRANSFER_STATUS_LABEL } from "@/lib/format";
 import { dropUndefined } from "@/lib/utils";
-import { friendlyError } from "@/lib/errors";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/repasses")({
@@ -101,7 +101,7 @@ function RepassesPage() {
         supabase.from("v_client_balances").select("*"),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
       ]);
-      if (transfers.error) throw transfers.error;
+      throwFirstError(transfers, balances, banks);
       return {
         transfers: transfers.data ?? [],
         balances: (balances.data ?? []) as unknown as {

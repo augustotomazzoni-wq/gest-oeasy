@@ -34,7 +34,7 @@ import {
   startOfYearISO,
   endOfYearISO,
 } from "@/lib/format";
-import { friendlyError } from "@/lib/errors";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import { PeriodFilter } from "@/components/PeriodFilter";
 import { periodLabel, periodRange, type PeriodType } from "@/lib/period";
 
@@ -113,7 +113,7 @@ function useDashboardData() {
           )
           .is("reversed_at", null),
       ]);
-      if (inst.error) throw inst.error;
+      throwFirstError(inst, balances, banks, txs, receivables, allCases, clients, receipts);
       return {
         installments: (inst.data ?? []) as unknown as InstallmentRow[],
         balances: balances.data ?? [],

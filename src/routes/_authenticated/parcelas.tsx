@@ -25,8 +25,8 @@ import {
 } from "@/components/ui/select";
 import { ClienteLink } from "@/components/ClienteDetalhe";
 import { useAuth } from "@/hooks/useAuth";
-import { money, num, dateBR, todayISO, daysBetween } from "@/lib/format";
-import { friendlyError } from "@/lib/errors";
+import { money, num, round2, dateBR, todayISO, daysBetween } from "@/lib/format";
+import { friendlyError, throwFirstError } from "@/lib/errors";
 import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -96,7 +96,6 @@ type ReceiptRow = {
   reversal_reason: string | null;
 };
 
-const round2 = (value: number) => Math.round(num(value) * 100) / 100;
 
 const FILTERS = [
   { key: "TODAS", label: "Todas" },
@@ -246,7 +245,7 @@ function ParcelasPage() {
         supabase.from("clients").select("id, name").is("deleted_at", null),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
       ]);
-      if (inst.error) throw inst.error;
+      throwFirstError(inst, clients, banks);
       return {
         rows: (inst.data ?? []) as unknown as Row[],
         clientMap: new Map((clients.data ?? []).map((c) => [c.id, c.name])),

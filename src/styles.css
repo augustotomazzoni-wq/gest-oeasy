@@ -161,6 +161,27 @@
     font-family: var(--font-display);
     letter-spacing: -0.01em;
   }
+
+  /*
+   * Respiro mínimo em toda célula de tabela.
+   *
+   * A maioria das células do sistema não tinha espaçamento nenhum — só a
+   * primeira e a última coluna costumavam receber `p-3` —, e as do meio
+   * encostavam umas nas outras. Como isto é um seletor de elemento, qualquer
+   * `p-2`/`p-3` escrito na célula continua vencendo: serve de piso, não de
+   * regra.
+   */
+  th,
+  td {
+    padding-block: 0.5rem;
+    padding-inline: 0.5rem;
+  }
+
+  /* Números e datas nunca quebram no meio. */
+  td.num,
+  th.num {
+    white-space: nowrap;
+  }
 }
 
 @utility panel {
