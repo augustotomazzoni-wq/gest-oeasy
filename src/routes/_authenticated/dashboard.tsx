@@ -355,9 +355,22 @@ function Dashboard() {
     )
     .reduce((s, r) => s + num(r.client_amount_received_by_firm), 0);
   const periodCashIn = Math.max(periodEntradas - periodClientDentroDeEntrada, 0);
-  // Só para saber se a frase sobre empréstimo deve aparecer — o valor em si
-  // não vai para a tela.
-  const periodTemEmprestimo = periodFinancingIn > 0.01;
+
+  // De que esse total é feito. Sem isso ele é um número que ninguém consegue
+  // conferir: quem soma honorários com empréstimo não chega nele, porque toda
+  // entrada lançada à mão no caixa (ou vinda da importação) também está aqui.
+  const periodCostReimb = (periodData?.receipts ?? []).reduce(
+    (s, r) => s + num(r.cost_reimbursement),
+    0,
+  );
+  // As entradas que nasceram de baixa de parcela valem o que caiu na conta:
+  // honorários, sucumbência, reembolso de custas e a parte da cliente junto.
+  const entradasDeParcelas =
+    periodFirmRevenue + periodCostReimb + periodClientDentroDeEntrada;
+  const outrasEntradas = Math.max(
+    periodEntradas - periodFinancingIn - entradasDeParcelas,
+    0,
+  );
   const periodProfit = periodFirmRevenue - periodExpenses;
   // O `?? []` não é paranoia: no preview, o React Query guarda em memória o
   // resultado da versão anterior do código. Ao trocar o módulo a quente depois
@@ -640,10 +653,45 @@ function Dashboard() {
             <p className="num mt-1 text-xl font-semibold text-success">
               {periodLoading ? "…" : money(periodCashIn)}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {periodTemEmprestimo
-                ? "Tem dinheiro de empréstimo somado aqui. Sem o dinheiro das clientes."
-                : "Empréstimos e aportes entram aqui. Sem o dinheiro das clientes."}
+            {/* A composição fica à vista: sem ela, ninguém consegue conferir
+                o total, e um número que não se confere não se usa. */}
+            <ul className="mt-2 flex flex-col gap-0.5 text-xs text-muted-foreground">
+              <li className="flex justify-between gap-2">
+                <span>Honorários + sucumbência</span>
+                <span className="num">{money(periodFirmRevenue)}</span>
+              </li>
+              {periodCostReimb > 0.01 && (
+                <li className="flex justify-between gap-2">
+                  <span>Reembolso de custas</span>
+                  <span className="num">{money(periodCostReimb)}</span>
+                </li>
+              )}
+              {periodFinancingIn > 0.01 && (
+                <li className="flex justify-between gap-2">
+                  <span>Empréstimos e aportes</span>
+                  <span className="num">{money(periodFinancingIn)}</span>
+                </li>
+              )}
+              {outrasEntradas > 0.01 && (
+                <li className="flex justify-between gap-2">
+                  <span>Outras entradas lançadas no caixa</span>
+                  <span className="num">{money(outrasEntradas)}</span>
+                </li>
+              )}
+            </ul>
+            {outrasEntradas > 0.01 && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                “Outras entradas” são lançamentos feitos direto no caixa ou vindos da importação,
+                que não nasceram de baixa de parcela. Veja quais em{" "}
+                <Link to="/caixa" className="underline underline-offset-2">
+                  Fluxo de Caixa
+                </Link>{" "}
+                com o filtro “Só receitas”.
+              </p>
+            )}
+            <p className="mt-2 text-xs text-muted-foreground">
+              Não entra aqui o dinheiro das clientes que veio junto numa baixa de parcela. Um
+              lançamento manual que seja de cliente, porém, o sistema não tem como reconhecer.
             </p>
           </div>
           <div className="panel p-4">
