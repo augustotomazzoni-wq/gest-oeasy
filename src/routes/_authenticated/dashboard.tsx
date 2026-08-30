@@ -361,7 +361,14 @@ function Dashboard() {
   // Honorários que contam como receita mas não entraram na conta no período —
   // é o que explica a receita ser maior que o caixa.
   const receitaForaDoCaixa = Math.max(periodFirmRevenue - entradasDeParcelas, 0);
+  // Duas leituras do mesmo período, e cada uma responde uma pergunta.
+  //
+  // A operação: o escritório se paga? Só honorários e sucumbência contra as
+  // despesas de operar. Empréstimo fica fora dos dois lados.
   const periodProfit = periodFirmRevenue - periodExpenses;
+  // O caixa: sobrou ou faltou dinheiro? Tudo que entrou contra tudo que saiu,
+  // empréstimo incluído nas duas pontas. É o mesmo número do Fluxo de Caixa.
+  const resultadoDeCaixa = periodCashIn - periodExpenses - periodFinancingOut;
   // O `?? []` não é paranoia: no preview, o React Query guarda em memória o
   // resultado da versão anterior do código. Ao trocar o módulo a quente depois
   // de acrescentar um campo nesta consulta, o componente renderiza uma vez com
@@ -696,7 +703,21 @@ function Dashboard() {
             </p>
           </div>
           <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Lucro do período</p>
+            <p className="text-xs text-muted-foreground uppercase">Resultado do caixa</p>
+            <p
+              className={`num mt-1 text-xl font-semibold ${
+                resultadoDeCaixa >= 0 ? "text-success" : "text-destructive"
+              }`}
+            >
+              {periodLoading ? "…" : money(resultadoDeCaixa)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Tudo que entrou menos tudo que saiu, empréstimo incluído dos dois lados. É o mesmo
+              número do Fluxo de Caixa.
+            </p>
+          </div>
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Resultado da operação</p>
             <p
               className={`num mt-1 text-xl font-semibold ${
                 periodProfit >= 0 ? "text-success" : "text-destructive"
@@ -704,9 +725,12 @@ function Dashboard() {
             >
               {periodLoading ? "…" : money(periodProfit)}
             </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Honorários menos despesas, sem empréstimo. Diz se o escritório se paga.
+            </p>
           </div>
           <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Lucro por processo ativo</p>
+            <p className="text-xs text-muted-foreground uppercase">Operação por processo ativo</p>
             <p className="num mt-1 text-xl font-semibold">
               {periodLoading ? "…" : money(profitPerCase)}
             </p>
@@ -839,9 +863,10 @@ function Dashboard() {
           <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
             Empréstimos no período: entrou{" "}
             <strong className="num text-foreground">{money(periodFinancingIn)}</strong> e saiu{" "}
-            <strong className="num text-foreground">{money(periodFinancingOut)}</strong>. Isso mexe
-            no saldo das contas, mas fica de fora do lucro e do custo por cliente — empréstimo não
-            é receita nem custo de operação, é dinheiro emprestado indo e voltando.
+            <strong className="num text-foreground">{money(periodFinancingOut)}</strong>. Isso
+            conta no resultado do caixa, porque mexe no saldo das contas, e fica de fora do
+            resultado da operação e do custo por cliente — empréstimo não é receita nem custo de
+            operar, é dinheiro emprestado indo e voltando.
           </div>
         )}
 
