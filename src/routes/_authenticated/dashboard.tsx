@@ -895,9 +895,13 @@ function Dashboard() {
           hint="A confirmar — fora do caixa"
           to="/acordos"
         />
+        {/* Estes três mostram o valor cheio da parcela, que é o que se cobra
+            da cliente. Os cards de recebíveis mostram só a parte do escritório
+            — por isso o aviso, para ninguém somar um com o outro. */}
         <Card
           label="Parcelas atrasadas"
           value={`${late.length} · ${money(sumBalance(late))}`}
+          hint="Valor cheio do acordo — cliente + escritório"
           tone={late.length ? "danger" : "default"}
           to="/parcelas"
           search={{ filtro: "ATRASADA" }}
@@ -905,12 +909,14 @@ function Dashboard() {
         <Card
           label="Vencem em 7 dias"
           value={money(sumBalance(next7))}
+          hint="Valor cheio do acordo — cliente + escritório"
           to="/parcelas"
           search={{ filtro: "VENCE_7" }}
         />
         <Card
           label="Vencem em 30 dias"
           value={money(sumBalance(next30))}
+          hint="Valor cheio do acordo — cliente + escritório"
           to="/parcelas"
           search={{ filtro: "VENCE_30" }}
         />
