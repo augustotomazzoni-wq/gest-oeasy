@@ -416,6 +416,7 @@ function CaixaPage() {
       Situação: TX_STATUS_LABEL[t.status] ?? t.status,
       Tipo: TX_TYPE_LABEL[t.type] ?? t.type,
       Descrição: t.description,
+      Cliente: t.clients?.name ?? "",
       Categoria: t.categories?.name ?? "",
       Conta: t.bank_accounts?.name ?? "",
       "Forma de pagamento": t.payment_method ? (PAYMENT_METHOD_LABEL[t.payment_method] ?? "") : "",
