@@ -100,6 +100,18 @@ const EMPTY = {
 
 const THIRD_PARTY = new Set(["entrada_de_terceiros", "repasse_de_terceiros"]);
 
+/**
+ * As duas pernas de uma transferência entre contas do próprio escritório.
+ * Elas são `saida` e `entrada` para o saldo das contas se mexer, mas não são
+ * receita nem despesa: o dinheiro só trocou de lugar.
+ */
+const TRANSFER_OUT = "transfer_out";
+const TRANSFER_IN = "transfer_in";
+
+const EMPTY_TRANSFER = { from: "", to: "", amount: "", date: "", notes: "" };
+const isTransfer = (t: { source_type: string | null }) =>
+  t.source_type === TRANSFER_OUT || t.source_type === TRANSFER_IN;
+
 type TxRow = {
   id: string;
   type: string;
@@ -116,6 +128,8 @@ type TxRow = {
   recurrence_index: number | null;
   recurrence_total: number | null;
   source_type: string | null;
+  /** Nas transferências entre contas é o id que liga a saída à entrada. */
+  source_id: string | null;
   is_financing: boolean | null;
   bank_accounts: { name: string } | null;
   categories: { name: string } | null;
@@ -152,6 +166,11 @@ function CaixaPage() {
   const [payTarget, setPayTarget] = useState<TxRow | null>(null);
   const [payDate, setPayDate] = useState(today);
   const [deleteTarget, setDeleteTarget] = useState<TxRow | null>(null);
+  // Transferência entre contas tem formulário próprio: são duas contas e nenhuma
+  // categoria, nada a ver com o de receita e despesa.
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferEditing, setTransferEditing] = useState<string | null>(null);
+  const [transfer, setTransfer] = useState({ ...EMPTY_TRANSFER, date: today });
 
   const custom = { start: customStart, end: customEnd };
   const { start, end } = periodRange(periodType, anchor, custom);
@@ -214,16 +233,36 @@ function CaixaPage() {
     const filtered =
       kind === "todos"
         ? porSituacao
-        : porSituacao.filter((t) =>
-            kind === "receitas" ? t.type === "entrada" : t.type === "saida",
+        : porSituacao.filter(
+            (t) =>
+              !isTransfer(t) && (kind === "receitas" ? t.type === "entrada" : t.type === "saida"),
           );
     return [...filtered].sort((a, b) => refDate(b).localeCompare(refDate(a)));
   }, [data, view, kind]);
 
   const totals = useMemo(() => {
-    const t = { in: 0, out: 0, thirdIn: 0, thirdOut: 0, aPagar: 0, aReceber: 0, finIn: 0, finOut: 0 };
+    const t = {
+      in: 0,
+      out: 0,
+      thirdIn: 0,
+      thirdOut: 0,
+      aPagar: 0,
+      aReceber: 0,
+      finIn: 0,
+      finOut: 0,
+      transferido: 0,
+    };
     for (const r of data?.transactions ?? []) {
       const v = num(r.amount);
+      // Transferência entre contas do escritório: o dinheiro só mudou de
+      // lugar. Somar a entrada como receita e a saída como despesa criaria um
+      // faturamento e um custo que nunca existiram — e o resultado do período
+      // ficaria igual, mas por cima de dois números inventados. Conta uma
+      // ponta só, para o card mostrar quanto foi movido.
+      if (isTransfer(r)) {
+        if (r.source_type === TRANSFER_OUT) t.transferido += v;
+        continue;
+      }
       if (r.status !== "pago") {
         if (r.type === "saida") t.aPagar += v;
         else if (r.type === "entrada") t.aReceber += v;
@@ -379,10 +418,132 @@ function CaixaPage() {
     onError: (e: Error) => toast.error("Erro ao apagar", { description: friendlyError(e) }),
   });
 
+  const salvarTransferencia = useMutation({
+    mutationFn: async () => {
+      const valor = num(Number(transfer.amount));
+      if (!transfer.from) throw new Error("Escolha a conta de origem");
+      if (!transfer.to) throw new Error("Escolha a conta de destino");
+      if (transfer.from === transfer.to)
+        throw new Error("A origem e o destino são a mesma conta");
+      if (valor <= 0) throw new Error("Informe um valor maior que zero");
+      if (!transfer.date) throw new Error("Informe a data da transferência");
+
+      // Corrigir mexe nas duas pernas de uma vez; criar grava as duas.
+      if (transferEditing) {
+        const { error } = await supabase.rpc(
+          "update_account_transfer",
+          dropUndefined({
+            _group_id: transferEditing,
+            _from_account: transfer.from,
+            _to_account: transfer.to,
+            _amount: valor,
+            _date: transfer.date,
+            _notes: transfer.notes.trim() || undefined,
+          }),
+        );
+        if (error) throw error;
+        return null;
+      }
+
+      const { data: resumo, error } = await supabase.rpc(
+        "create_account_transfer",
+        dropUndefined({
+          _from_account: transfer.from,
+          _to_account: transfer.to,
+          _amount: valor,
+          _date: transfer.date,
+          _notes: transfer.notes.trim() || undefined,
+        }),
+      );
+      if (error) throw error;
+      return resumo as unknown as {
+        de: string;
+        para: string;
+        valor: number;
+        saldo_da_origem: number;
+      } | null;
+    },
+    onSuccess: (r) => {
+      // O saldo da origem depois da transferência vem junto: se ficou negativo,
+      // quem lançou precisa saber na hora, não no fim do mês.
+      const negativo = r && num(r.saldo_da_origem) < 0;
+      toast.success(
+        transferEditing
+          ? "Transferência corrigida nas duas contas."
+          : `Transferência registrada: ${r?.de} → ${r?.para}.`,
+        {
+          description: negativo
+            ? `Atenção: ${r?.de} ficou com saldo de ${money(num(r?.saldo_da_origem))}.`
+            : undefined,
+        },
+      );
+      closeTransfer();
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) =>
+      toast.error("Erro na transferência", { description: friendlyError(e) }),
+  });
+
+  const removeTransfer = useMutation({
+    mutationFn: async (groupId: string) => {
+      const { error } = await supabase.rpc("delete_account_transfer", { _group_id: groupId });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Transferência apagada das duas contas.");
+      setDeleteTarget(null);
+      void qc.invalidateQueries();
+    },
+    onError: (e: Error) => toast.error("Erro ao excluir", { description: friendlyError(e) }),
+  });
+
   function closeForm() {
     setOpen(false);
     setEditing(null);
     setForm(EMPTY);
+  }
+
+  function closeTransfer() {
+    setTransferOpen(false);
+    setTransferEditing(null);
+    setTransfer({ ...EMPTY_TRANSFER, date: today });
+  }
+
+  function openNewTransfer() {
+    setTransferEditing(null);
+    setTransfer({ ...EMPTY_TRANSFER, date: today });
+    setTransferOpen(true);
+  }
+
+  /**
+   * Abre a correção a partir de qualquer uma das duas linhas. A origem e o
+   * destino são descobertos pelo par: a linha clicada dá uma das contas, e a
+   * irmã dá a outra.
+   */
+  function openEditTransfer(linha: TxRow) {
+    const grupo = linha.source_id;
+    if (!grupo) return;
+    const par = (data?.transactions ?? []).filter((t) => t.source_id === grupo && isTransfer(t));
+    const saida = par.find((t) => t.source_type === TRANSFER_OUT);
+    const entrada = par.find((t) => t.source_type === TRANSFER_IN);
+    // As duas pernas nascem com a mesma data, então aparecem sempre no mesmo
+    // recorte. Faltar uma significa dado quebrado — melhor avisar do que abrir
+    // o formulário com a origem e o destino trocados.
+    if (!saida || !entrada) {
+      toast.error("Transferência incompleta", {
+        description: "Não encontrei as duas pernas desta transferência. Apague e lance de novo.",
+      });
+      return;
+    }
+    setTransferEditing(grupo);
+    setTransfer({
+      from: saida.bank_account_id ?? "",
+      to: entrada.bank_account_id ?? "",
+      amount: String(num(linha.amount)),
+      date: refDate(linha) || today,
+      notes: linha.notes ?? "",
+    });
+    setTransferOpen(true);
   }
 
   function openNew() {
@@ -414,7 +575,14 @@ function CaixaPage() {
     const linhas = rows.map((t) => ({
       Data: dateBR(refDate(t)),
       Situação: TX_STATUS_LABEL[t.status] ?? t.status,
-      Tipo: TX_TYPE_LABEL[t.type] ?? t.type,
+      // Na planilha a transferência não pode sair como "Receita" ou "Despesa":
+      // quem conferir no Excel somaria as duas pernas como se fossem faturamento
+      // e custo.
+      Tipo: isTransfer(t)
+        ? t.source_type === TRANSFER_OUT
+          ? "Transferência enviada"
+          : "Transferência recebida"
+        : (TX_TYPE_LABEL[t.type] ?? t.type),
       Descrição: t.description,
       Cliente: t.clients?.name ?? "",
       Categoria: t.categories?.name ?? "",
@@ -442,6 +610,11 @@ function CaixaPage() {
             {canExport && (
               <Button variant="outline" onClick={exportar} disabled={rows.length === 0}>
                 Exportar
+              </Button>
+            )}
+            {canLaunch && (
+              <Button variant="outline" onClick={openNewTransfer}>
+                Transferir entre contas
               </Button>
             )}
             {canLaunch && <Button onClick={openNew}>Novo lançamento</Button>}
@@ -552,6 +725,15 @@ function CaixaPage() {
             {money(totals.thirdIn)} / {money(totals.thirdOut)}
           </p>
         </div>
+        {totals.transferido > 0.01 && (
+          <div className="panel p-4">
+            <p className="text-xs text-muted-foreground uppercase">Transferido entre contas</p>
+            <p className="num mt-1 text-xl font-semibold">{money(totals.transferido)}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Mudou de conta, não é receita nem despesa
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
@@ -613,17 +795,26 @@ function CaixaPage() {
                     )}
                   </td>
                   <td>
-                    <Tag
-                      tone={
-                        THIRD_PARTY.has(t.type)
-                          ? "info"
-                          : t.type === "entrada"
-                            ? "success"
-                            : "danger"
-                      }
-                    >
-                      {TX_TYPE_LABEL[t.type] ?? t.type}
-                    </Tag>
+                    {/* A transferência tem etiqueta própria: marcada como
+                        "Receita" ou "Despesa" ela pareceria dinheiro entrando
+                        ou saindo do escritório, e não é. */}
+                    {isTransfer(t) ? (
+                      <Tag tone="info">
+                        {t.source_type === TRANSFER_OUT ? "Transf. enviada" : "Transf. recebida"}
+                      </Tag>
+                    ) : (
+                      <Tag
+                        tone={
+                          THIRD_PARTY.has(t.type)
+                            ? "info"
+                            : t.type === "entrada"
+                              ? "success"
+                              : "danger"
+                        }
+                      >
+                        {TX_TYPE_LABEL[t.type] ?? t.type}
+                      </Tag>
+                    )}
                   </td>
                   <td>
                     <Tag tone={t.status === "pago" ? "success" : "warning"}>
@@ -665,6 +856,24 @@ function CaixaPage() {
                           onClick={() => setDeleteTarget(t)}
                         >
                           Excluir
+                        </Button>
+                      )}
+                      {/* A transferência é um par: editar ou apagar leva as duas
+                          pernas juntas, senão uma conta ficaria com saldo errado.
+                          Por isso não usa os botões acima. */}
+                      {canEdit && isTransfer(t) && (
+                        <Button size="sm" variant="ghost" onClick={() => openEditTransfer(t)}>
+                          Editar transferência
+                        </Button>
+                      )}
+                      {canDelete && isTransfer(t) && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() => setDeleteTarget(t)}
+                        >
+                          Apagar transferência
                         </Button>
                       )}
                       {t.recurrence_group_id && t.status !== "pago" && (
@@ -944,21 +1153,176 @@ function CaixaPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Transferência entre contas do escritório: duas contas, um valor, uma
+          data. Sem categoria e sem forma de pagamento — não é receita nem
+          despesa, então nada disso se aplica. */}
+      <Dialog
+        open={transferOpen}
+        onOpenChange={(v) => (v ? setTransferOpen(true) : closeTransfer())}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {transferEditing ? "Corrigir transferência" : "Transferir entre contas"}
+            </DialogTitle>
+            <DialogDescription>
+              O dinheiro sai de uma conta e entra na outra no mesmo dia. Não conta como receita nem
+              como despesa: o escritório continua com o mesmo total, só em outro lugar.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Sai da conta</Label>
+              <Select
+                value={transfer.from}
+                onValueChange={(v) => setTransfer({ ...transfer, from: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Escolha a conta de origem" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(data?.banks ?? []).map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {/* O saldo à vista evita a transferência que deixa a conta
+                  negativa por distração. */}
+              {transfer.from && (
+                <p className="text-xs text-muted-foreground">
+                  Saldo hoje:{" "}
+                  <span className="num">
+                    {money(
+                      num(
+                        (data?.balances ?? []).find((b) => b.bank_account_id === transfer.from)
+                          ?.balance,
+                      ),
+                    )}
+                  </span>
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label>Entra na conta</Label>
+              <Select
+                value={transfer.to}
+                onValueChange={(v) => setTransfer({ ...transfer, to: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Escolha a conta de destino" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(data?.banks ?? [])
+                    // A mesma conta nos dois lados não é transferência nenhuma.
+                    .filter((b) => b.id !== transfer.from)
+                    .map((b) => (
+                      <SelectItem key={b.id} value={b.id}>
+                        {b.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              {transfer.to && (
+                <p className="text-xs text-muted-foreground">
+                  Saldo hoje:{" "}
+                  <span className="num">
+                    {money(
+                      num(
+                        (data?.balances ?? []).find((b) => b.bank_account_id === transfer.to)
+                          ?.balance,
+                      ),
+                    )}
+                  </span>
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="tval">Valor</Label>
+              <Input
+                id="tval"
+                type="number"
+                min="0"
+                step="0.01"
+                value={transfer.amount}
+                onChange={(e) => setTransfer({ ...transfer, amount: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="tdt">Data da transferência</Label>
+              <Input
+                id="tdt"
+                type="date"
+                value={transfer.date}
+                onChange={(e) => setTransfer({ ...transfer, date: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="tobs">Observações</Label>
+              <Textarea
+                id="tobs"
+                rows={2}
+                placeholder="Opcional — o motivo da transferência, por exemplo."
+                value={transfer.notes}
+                onChange={(e) => setTransfer({ ...transfer, notes: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={closeTransfer}>
+              Cancelar
+            </Button>
+            <Button
+              disabled={salvarTransferencia.isPending}
+              onClick={() => salvarTransferencia.mutate()}
+            >
+              {salvarTransferencia.isPending
+                ? "Salvando…"
+                : transferEditing
+                  ? "Salvar correção"
+                  : "Transferir"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Excluir este lançamento?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {deleteTarget && isTransfer(deleteTarget)
+                ? "Apagar esta transferência?"
+                : "Excluir este lançamento?"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget?.description} — {money(deleteTarget?.amount ?? 0)} em{" "}
-              {dateBR(refDate(deleteTarget ?? { status: "", paid_on: null, due_date: null }))}. O
-              lançamento sai do caixa e do saldo da conta. Fica registrado quem apagou, quando e
-              com quais valores, no histórico de auditoria.
+              {dateBR(refDate(deleteTarget ?? { status: "", paid_on: null, due_date: null }))}.{" "}
+              {deleteTarget && isTransfer(deleteTarget)
+                ? "As duas pernas somem juntas, e o saldo das duas contas volta ao que era antes."
+                : "O lançamento sai do caixa e do saldo da conta."}{" "}
+              Fica registrado quem apagou, quando e com quais valores, no histórico de auditoria.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction disabled={remove.isPending} onClick={() => remove.mutate()}>
-              {remove.isPending ? "Excluindo…" : "Excluir"}
+            <AlertDialogAction
+              disabled={remove.isPending || removeTransfer.isPending}
+              onClick={() => {
+                if (deleteTarget && isTransfer(deleteTarget) && deleteTarget.source_id) {
+                  removeTransfer.mutate(deleteTarget.source_id);
+                  return;
+                }
+                remove.mutate();
+              }}
+            >
+              {remove.isPending || removeTransfer.isPending ? "Excluindo…" : "Excluir"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

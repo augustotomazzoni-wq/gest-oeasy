@@ -1580,6 +1580,31 @@ export type Database = {
         Args: { _id: string }
         Returns: undefined
       }
+      create_account_transfer: {
+        Args: {
+          _amount: number
+          _date: string
+          _from_account: string
+          _notes?: string
+          _to_account: string
+        }
+        Returns: Json
+      }
+      update_account_transfer: {
+        Args: {
+          _amount: number
+          _date: string
+          _from_account: string
+          _group_id: string
+          _notes?: string
+          _to_account: string
+        }
+        Returns: undefined
+      }
+      delete_account_transfer: {
+        Args: { _group_id: string }
+        Returns: undefined
+      }
       delete_manual_transaction: {
         Args: { _id: string }
         Returns: undefined

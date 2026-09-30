@@ -87,7 +87,7 @@ function useDashboardData() {
         supabase.from("v_bank_balances").select("*"),
         supabase
           .from("financial_transactions")
-          .select("id, type, amount, paid_on, status, description, is_financing")
+          .select("id, type, amount, paid_on, status, description, is_financing, source_type")
           .eq("status", "pago"),
         supabase
           .from("legal_receivables")
@@ -322,8 +322,14 @@ function Dashboard() {
   // Parcela de empréstimo não é custo de operação: é devolução de dinheiro
   // que já entrou. Deixá-la aqui derrubaria o lucro e o custo por cliente de
   // todo mês por algo que não tem a ver com atender cliente.
+  // Transferência entre contas do próprio escritório também fica fora dos dois
+  // lados. A perna de saída é `saida` e a de entrada é `entrada`, para o saldo
+  // de cada conta andar — mas somá-las aqui criaria uma despesa e uma receita
+  // que nunca existiram: o dinheiro só trocou de conta.
+  const ehTransferencia = (t: { source_type?: string | null }) =>
+    t.source_type === "transfer_out" || t.source_type === "transfer_in";
   const periodExpenses = (periodData?.txs ?? [])
-    .filter((t) => t.type === "saida" && !t.is_financing)
+    .filter((t) => t.type === "saida" && !t.is_financing && !ehTransferencia(t))
     .reduce((s, t) => s + num(t.amount), 0);
   const periodFinancingOut = (periodData?.txs ?? [])
     .filter((t) => t.type === "saida" && t.is_financing)
@@ -348,7 +354,9 @@ function Dashboard() {
   // A composição sai das linhas do caixa, e não de somar receita com
   // empréstimo: receita vem dos recebimentos, caixa vem dos lançamentos, e
   // misturar as duas origens dava uma composição que não fechava com o total.
-  const entradasDoPeriodo = (periodData?.txs ?? []).filter((t) => t.type === "entrada");
+  const entradasDoPeriodo = (periodData?.txs ?? []).filter(
+    (t) => t.type === "entrada" && !ehTransferencia(t),
+  );
   const somar = (rows: typeof entradasDoPeriodo) =>
     rows.reduce((s, t) => s + num(t.amount), 0);
   const entradasDeParcelas = somar(
@@ -472,7 +480,7 @@ function Dashboard() {
   // período: é devolução de dinheiro emprestado, não custo de operação.
   // Somá-la aqui deixava esta despesa maior que a do card de cima.
   const expenses = d.txs
-    .filter((t) => t.type === "saida" && !t.is_financing)
+    .filter((t) => t.type === "saida" && !t.is_financing && !ehTransferencia(t))
     .reduce((s, t) => s + num(t.amount as number), 0);
   const transferred = d.balances.reduce((s, b) => s + num(b.transferred as number), 0);
   const pendingTransfer = d.balances.reduce((s, b) => s + num(b.pending_transfer as number), 0);
