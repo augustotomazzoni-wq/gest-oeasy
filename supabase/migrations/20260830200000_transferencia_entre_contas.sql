@@ -267,3 +267,30 @@ GRANT EXECUTE ON FUNCTION public.update_account_transfer(uuid, uuid, uuid, numer
 
 REVOKE EXECUTE ON FUNCTION public.delete_account_transfer(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.delete_account_transfer(uuid) TO authenticated;
+
+-- ============================================================
+-- 4) Avisar a API que existem funções novas
+--
+--    O PostgREST guarda em memória a lista do que existe no banco. Sem este
+--    aviso ele pode continuar respondendo "could not find the function" por
+--    alguns minutos depois da migration rodar — que é a tela dizendo "o banco
+--    de dados está desatualizado" mesmo com tudo já criado.
+-- ============================================================
+NOTIFY pgrst, 'reload schema';
+
+-- ============================================================
+-- 5) Conferência: as três funções têm de aparecer aqui
+--
+--    Se esta última consulta devolver as 3 linhas, está tudo no lugar e a tela
+--    de transferência funciona. Se vier vazia, alguma coisa acima não rodou.
+-- ============================================================
+SELECT p.proname AS funcao_criada
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'public'
+  AND p.proname IN (
+    'create_account_transfer',
+    'update_account_transfer',
+    'delete_account_transfer'
+  )
+ORDER BY p.proname;
