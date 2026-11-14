@@ -198,6 +198,41 @@ function receivableOf(row: unknown): { client_id?: string; case_id?: string } | 
   return rec as { client_id?: string; case_id?: string } | undefined;
 }
 
+/**
+ * Honorários do escritório num intervalo: o que entrou e o que está marcado
+ * para entrar, mês a mês.
+ *
+ * Tem consulta própria porque responde outra pergunta que o resto do
+ * dashboard: não é o resultado do mês, é o fôlego do caixa daqui para frente.
+ * Por isso o recebido é agrupado pela data em que o dinheiro entrou, e o a
+ * receber pelo vencimento da parcela.
+ */
+function useHonorariosData(start: string, end: string) {
+  return useQuery({
+    queryKey: ["dashboard-honorarios", start, end],
+    queryFn: async () => {
+      const [recebidos, aReceber] = await Promise.all([
+        supabase
+          .from("receipts")
+          .select("fee_amount, success_fee_amount, received_on")
+          .is("reversed_at", null)
+          .gte("received_on", start)
+          .lte("received_on", end),
+        supabase
+          .from("v_installments")
+          .select("due_date, fee_amount, success_fee_amount, paid_fee, paid_success_fee, status")
+          .gte("due_date", start)
+          .lte("due_date", end),
+      ]);
+      throwFirstError(recebidos, aReceber);
+      return {
+        recebidos: recebidos.data ?? [],
+        aReceber: aReceber.data ?? [],
+      };
+    },
+  });
+}
+
 /** Extrai o id do cliente da estrutura aninhada que o PostgREST devolve. */
 function clientIdOf(row: unknown): string | null {
   return receivableOf(row)?.client_id ?? null;
@@ -325,6 +360,15 @@ function Dashboard() {
   const mixCustom = { start: mixStart, end: mixEnd };
   const mixRange = periodRange(mixType, mixAnchor, mixCustom);
   const { data: mixData, isLoading: mixLoading } = useMixData(mixRange.start, mixRange.end);
+
+  // Filtro exclusivo do gráfico de honorários.
+  const [honType, setHonType] = useState<PeriodType>("ano");
+  const [honAnchor, setHonAnchor] = useState(today);
+  const [honStart, setHonStart] = useState(startOfYearISO(today));
+  const [honEnd, setHonEnd] = useState(today);
+  const honCustom = { start: honStart, end: honEnd };
+  const honRange = periodRange(honType, honAnchor, honCustom);
+  const { data: honData, isLoading: honLoading } = useHonorariosData(honRange.start, honRange.end);
 
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">Carregando indicadores…</p>;
@@ -562,6 +606,40 @@ function Dashboard() {
     (s, r) => s + num(r.client_amount_received_direct as number),
     0,
   );
+
+  // Honorários mês a mês: o recebido pela data em que o dinheiro entrou, o a
+  // receber pelo vencimento da parcela.
+  const honPorMes = new Map<string, { recebido: number; aReceber: number }>();
+  const slot = (mes: string) => {
+    const atual = honPorMes.get(mes) ?? { recebido: 0, aReceber: 0 };
+    honPorMes.set(mes, atual);
+    return atual;
+  };
+  for (const r of honData?.recebidos ?? []) {
+    const mes = String(r.received_on ?? "").slice(0, 7);
+    if (!mes) continue;
+    slot(mes).recebido += num(r.fee_amount as number) + num(r.success_fee_amount as number);
+  }
+  for (const i of honData?.aReceber ?? []) {
+    const status = String(i.status ?? "");
+    if (status === "PAGA" || status === "CANCELADA") continue;
+    const mes = String(i.due_date ?? "").slice(0, 7);
+    if (!mes) continue;
+    const aberto = Math.max(
+      num(i.fee_amount as number) +
+        num(i.success_fee_amount as number) -
+        num(i.paid_fee as number) -
+        num(i.paid_success_fee as number),
+      0,
+    );
+    if (aberto <= 0.01) continue;
+    slot(mes).aReceber += aberto;
+  }
+  const honorarios = [...honPorMes.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([mes, v]) => ({ mes: mes.split("-").reverse().join("/"), ...v }));
+  const honRecebidoTotal = honorarios.reduce((s, h) => s + h.recebido, 0);
+  const honAReceberTotal = honorarios.reduce((s, h) => s + h.aReceber, 0);
 
   const late = d.installments.filter((i) => i.status === "ATRASADA");
   const next7 = d.installments.filter(
@@ -1105,6 +1183,57 @@ function Dashboard() {
               : `As clientes receberam ${money(mixThird + mixDirect)} no período: ` +
                 `${money(mixThird)} passaram pela conta do escritório e viram repasse, e ` +
                 `${money(mixDirect)} caíram direto na conta delas, sem passar por aqui.`}
+          </p>
+        </div>
+
+        <div className="panel p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-semibold">
+                Honorários do escritório por mês
+              </h2>
+              <p className="num mt-1 text-xs text-muted-foreground">
+                {periodLabel(honType, honAnchor, honCustom)}
+              </p>
+            </div>
+            <PeriodFilter
+              type={honType}
+              onTypeChange={setHonType}
+              anchor={honAnchor}
+              onAnchorChange={setHonAnchor}
+              customStart={honStart}
+              customEnd={honEnd}
+              onCustomStartChange={setHonStart}
+              onCustomEndChange={setHonEnd}
+            />
+          </div>
+          <div className="mt-4 h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={honorarios}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                <XAxis dataKey="mes" fontSize={12} />
+                <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
+                <Tooltip formatter={(v) => money(v as number)} />
+                <Legend />
+                <Bar
+                  dataKey="recebido"
+                  name="Já recebido"
+                  fill="var(--color-success)"
+                  radius={[4, 4, 0, 0]}
+                />
+                <Bar
+                  dataKey="aReceber"
+                  name="A receber"
+                  fill="var(--color-chart-1)"
+                  radius={[4, 4, 0, 0]}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {honLoading
+              ? "Carregando…"
+              : `No período: ${money(honRecebidoTotal)} recebidos e ${money(honAReceberTotal)} a receber. Só honorários e sucumbência — o dinheiro das clientes fica de fora.`}
           </p>
         </div>
 

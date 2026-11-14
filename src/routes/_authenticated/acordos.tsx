@@ -33,11 +33,18 @@ import {
   round2,
   todayISO,
   addMonthsISO,
+  dateBR,
   RECEIVABLE_TYPE_LABEL,
   RECEIVABLE_STATUS_LABEL,
   FLOW_LABEL,
 } from "@/lib/format";
 import { friendlyError, throwFirstError } from "@/lib/errors";
+import {
+  ALL_FIELDS,
+  FieldFilter,
+  makeFieldMatcher,
+  type FilterField,
+} from "@/components/FieldFilter";
 import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -127,6 +134,63 @@ type ScheduleRow = {
   client_amount: number;
   cost_reimbursement: number;
 };
+
+/** Linha de acordo com cliente e processo já resolvidos, para o filtro. */
+type AcordoFiltravel = {
+  clients: { name: string } | null;
+  cases: { case_number: string | null } | null;
+  type: string;
+  status: string;
+  description: string | null;
+  notes: string | null;
+  agreement_date: string | null;
+  flow: string | null;
+  gross_amount: number | null;
+  expected_firm_amount: number | null;
+  expected_client_amount: number | null;
+  success_fee_amount: number | null;
+};
+
+const txt = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+
+const CAMPOS_ACORDO: FilterField<AcordoFiltravel>[] = [
+  { key: "cliente", label: "Cliente", get: (r) => r.clients?.name ?? "" },
+  { key: "processo", label: "Processo", get: (r) => txt(r.cases?.case_number) },
+  {
+    key: "tipo",
+    label: "Tipo",
+    get: (r) => RECEIVABLE_TYPE_LABEL[r.type] ?? txt(r.type),
+  },
+  {
+    key: "situacao",
+    label: "Situação",
+    get: (r) => RECEIVABLE_STATUS_LABEL[r.status] ?? txt(r.status),
+  },
+  { key: "descricao", label: "Descrição", get: (r) => txt(r.description) },
+  { key: "notas", label: "Observações", get: (r) => txt(r.notes) },
+  { key: "data", label: "Data do acordo", get: (r) => dateBR(r.agreement_date) },
+  {
+    key: "fluxo",
+    label: "Quem recebe",
+    get: (r) => (r.flow ? (FLOW_LABEL[r.flow] ?? txt(r.flow)) : ""),
+  },
+  { key: "bruto", label: "Valor bruto", get: (r) => money(num(r.gross_amount)) },
+  {
+    key: "escritorio",
+    label: "Valor do escritório",
+    get: (r) => money(num(r.expected_firm_amount)),
+  },
+  {
+    key: "cliente_valor",
+    label: "Valor da cliente",
+    get: (r) => money(num(r.expected_client_amount)),
+  },
+  {
+    key: "sucumbencia",
+    label: "Sucumbência",
+    get: (r) => money(num(r.success_fee_amount)),
+  },
+];
 
 const cents = (value: number) => Math.max(0, Math.round(num(value) * 100));
 const fromCents = (value: number) => value / 100;
@@ -502,6 +566,8 @@ function AcordosPage() {
   }
 
   const [sortBy, setSortBy] = useState("recentes");
+  const [field, setField] = useState<string>(ALL_FIELDS);
+  const [search, setSearch] = useState("");
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{
     id: string;
@@ -868,7 +934,10 @@ function AcordosPage() {
 
   /** Lista ordenada conforme o seletor acima da tabela. */
   const sortedReceivables = useMemo(() => {
-    const rows = [...(data?.receivables ?? [])];
+    const combina = makeFieldMatcher(CAMPOS_ACORDO, field, search);
+    const rows = [...(data?.receivables ?? [])].filter((r) =>
+      combina(r as unknown as AcordoFiltravel),
+    );
     const nome = (r: (typeof rows)[number]) =>
       ((r.clients as { name: string } | null)?.name ?? "").toLocaleLowerCase("pt-BR");
     // O total a receber é o que a tabela mostra, então é por ele que se ordena
@@ -896,7 +965,7 @@ function AcordosPage() {
       default:
         return rows;
     }
-  }, [data, sortBy]);
+  }, [data, sortBy, field, search]);
 
   const create = useMutation({
     mutationFn: async () => {
@@ -2143,6 +2212,15 @@ function AcordosPage() {
             </Dialog>
           )
         }
+      />
+
+      <FieldFilter
+        fields={CAMPOS_ACORDO}
+        fieldKey={field}
+        onFieldChange={setField}
+        term={search}
+        onTermChange={setSearch}
+        placeholder="Buscar por cliente, processo, valor…"
       />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">

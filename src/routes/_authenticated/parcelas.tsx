@@ -27,6 +27,12 @@ import { ClienteLink } from "@/components/ClienteDetalhe";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, round2, dateBR, todayISO, daysBetween } from "@/lib/format";
 import { friendlyError, throwFirstError } from "@/lib/errors";
+import {
+  ALL_FIELDS,
+  FieldFilter,
+  makeFieldMatcher,
+  type FilterField,
+} from "@/components/FieldFilter";
 import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -54,6 +60,32 @@ export const Route = createFileRoute("/_authenticated/parcelas")({
   }),
   component: ParcelasPage,
 });
+
+/**
+ * A linha da tabela com o nome do cliente já resolvido. O filtro precisa dele
+ * como texto, e ele não vem na view — vem do mapa de clientes.
+ */
+type LinhaFiltravel = Row & { __cliente: string };
+
+const texto = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+const dinheiro = (v: unknown) => money(num(v as number));
+
+const CAMPOS_PARCELA: FilterField<LinhaFiltravel>[] = [
+  { key: "cliente", label: "Cliente", get: (r) => r.__cliente },
+  { key: "label", label: "Parcela", get: (r) => texto(r.label) },
+  { key: "due_date", label: "Vencimento", get: (r) => dateBR(r.due_date) },
+  { key: "status", label: "Situação", get: (r) => texto(r.status) },
+  { key: "gross_amount", label: "Valor", get: (r) => dinheiro(r.gross_amount) },
+  {
+    key: "escritorio",
+    label: "Valor do escritório",
+    get: (r) => dinheiro(num(r.fee_amount) + num(r.success_fee_amount)),
+  },
+  { key: "client_amount", label: "Valor da cliente", get: (r) => dinheiro(r.client_amount) },
+  { key: "paid_total", label: "Recebido", get: (r) => dinheiro(r.paid_total) },
+  { key: "balance", label: "Saldo", get: (r) => dinheiro(r.balance) },
+  { key: "stream", label: "Origem", get: (r) => texto(r.stream) },
+];
 
 type Row = {
   id: string;
@@ -118,6 +150,7 @@ function ParcelasPage() {
   const { filtro } = Route.useSearch();
   const [filter, setFilter] = useState(() => filtro ?? "TODAS");
   const [search, setSearch] = useState("");
+  const [field, setField] = useState<string>(ALL_FIELDS);
 
   // Os cartões do dashboard levam direto para o filtro certo (ex.: "Parcelas
   // atrasadas" → filtro=ATRASADA), sem exigir um clique extra na aba.
@@ -255,8 +288,8 @@ function ParcelasPage() {
   });
 
   const allRows = useMemo(() => {
-    const term = search.trim().toLowerCase();
     const today = todayISO();
+    const combina = makeFieldMatcher(CAMPOS_PARCELA, field, search);
     return (data?.rows ?? []).filter((r) => {
       if (filter === "VENCE_7" || filter === "VENCE_30") {
         const limit = filter === "VENCE_7" ? 7 : 30;
@@ -272,11 +305,10 @@ function ParcelasPage() {
       } else if (filter !== "TODAS" && r.status !== filter) {
         return false;
       }
-      if (!term) return true;
-      const name = (r.client_id && data?.clientMap.get(r.client_id)) || "";
-      return name.toLowerCase().includes(term);
+      const nome = (r.client_id && data?.clientMap.get(r.client_id)) || "";
+      return combina({ ...r, __cliente: nome });
     });
-  }, [data, filter, search]);
+  }, [data, filter, field, search]);
 
   const [visibleCount, setVisibleCount] = useState(50);
   useEffect(() => setVisibleCount(50), [filter, search]);
@@ -633,13 +665,16 @@ function ParcelasPage() {
             {f.label}
           </Button>
         ))}
-        <Input
-          className="ml-auto w-full sm:w-64"
-          placeholder="Buscar por cliente"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
       </div>
+
+      <FieldFilter
+        fields={CAMPOS_PARCELA}
+        fieldKey={field}
+        onFieldChange={setField}
+        term={search}
+        onTermChange={setSearch}
+        placeholder="Buscar por cliente, vencimento, valor…"
+      />
 
       <div className="panel overflow-x-auto">
         <table className="w-full text-sm">
