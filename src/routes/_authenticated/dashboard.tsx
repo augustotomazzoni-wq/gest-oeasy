@@ -208,6 +208,23 @@ function caseIdOf(row: unknown): string | null {
   return receivableOf(row)?.case_id ?? null;
 }
 
+/**
+ * A área do direito como ela chega do banco: "TRABALHISTA", "Previdenciário",
+ * com espaços sobrando. Normaliza para comparar e para guardar no navegador.
+ */
+function normalizarArea(texto: string | null | undefined): string | null {
+  const t = (texto ?? "").trim().toLowerCase();
+  return t || null;
+}
+
+/** "trabalhista" -> "Trabalhista". */
+function rotuloArea(valor: string): string {
+  return valor.charAt(0).toUpperCase() + valor.slice(1);
+}
+
+/** O escritório é de trabalhista: é a área que abre marcada. */
+const AREA_PADRAO = "trabalhista";
+
 type DashboardLink = "/caixa" | "/repasses" | "/parcelas" | "/acordos";
 
 function Card({
@@ -221,7 +238,7 @@ function Card({
   label: string;
   value: string;
   hint?: string;
-  tone?: "default" | "danger" | "success";
+  tone?: "default" | "danger" | "success" | "warning";
   to?: DashboardLink;
   search?: { filtro?: string };
 }) {
@@ -230,12 +247,27 @@ function Card({
       <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{label}</p>
       <p
         className={`num mt-2 font-display text-2xl font-semibold ${
-          tone === "danger" ? "text-destructive" : tone === "success" ? "text-success" : ""
+          tone === "danger"
+            ? "text-destructive"
+            : tone === "success"
+              ? "text-success"
+              : ""
         }`}
       >
         {value}
       </p>
-      {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+      {/* O aviso do saldo com dinheiro de cliente precisa saltar aos olhos,
+          mas o valor em si não é um erro — por isso a cor vai na nota, não
+          no número. */}
+      {hint && (
+        <p
+          className={`mt-1 text-xs ${
+            tone === "warning" ? "font-medium text-warning" : "text-muted-foreground"
+          }`}
+        >
+          {hint}
+        </p>
+      )}
     </div>
   );
   return to ? (
@@ -256,15 +288,16 @@ function Dashboard() {
   const today = todayISO();
 
   // Área do direito das métricas por cliente. Fica guardada no navegador para
-  // não ter que reescolher "Trabalhista" toda vez que abrir o dashboard.
+  // não ter que reescolher a área toda vez que abrir o dashboard.
+  //
+  // O escritório é de trabalhista, então é essa a área que abre marcada — mas
+  // o filtro agora lê as áreas que existem nos processos, em vez de assumir
+  // que tudo o que não é trabalhista é cível.
   const [area, setArea] = useState(() => {
     try {
-      // Só dois valores valem hoje. Qualquer coisa guardada por uma versão
-      // anterior deste filtro vira "Todas" em vez de deixar a tela num estado
-      // em que nenhum botão aparece marcado.
-      return localStorage.getItem("dashboard-area") === "trabalhista" ? "trabalhista" : "";
+      return localStorage.getItem("dashboard-area") ?? AREA_PADRAO;
     } catch {
-      return "";
+      return AREA_PADRAO;
     }
   });
   function escolherArea(valor: string) {
@@ -385,21 +418,28 @@ function Dashboard() {
   const nomePorCliente = new Map((d.clients ?? []).map((c) => [c.id, c.name]));
   const nomeDoCliente = (id: string | null | undefined) =>
     (id && nomePorCliente.get(id)) || "—";
-  const activeCases = casos.filter((c) => c.status === "ativo").length;
-  const profitPerCase = activeCases > 0 ? periodProfit / activeCases : 0;
 
   // O escritório é de trabalhista: o cível é a exceção, e são pouquíssimos
   // casos. Por isso a regra é pela negativa — trabalhista é tudo que não está
   // marcado como cível, inclusive acordo sem processo vinculado ou com a área
   // em branco. Assim ninguém precisa marcar nada no caso comum, e um processo
   // novo entra certo por padrão.
-  const ehCivel = (texto: string | null | undefined) => {
-    const t = (texto ?? "").toLowerCase();
-    return t.includes("civ") || t.includes("cív");
-  };
-  const casosCiveis = new Set(casos.filter((c) => ehCivel(c.practice_area)).map((c) => c.id));
+  // As áreas que realmente existem nos processos, para o filtro não depender
+  // de uma lista fixa no código. Antes ele procurava "cível" e, como nenhum
+  // processo é cível, escolher "Trabalhista" não mudava número nenhum: o
+  // filtro existia mas não filtrava.
+  const areasDisponiveis = [...new Set(
+    casos.map((c) => normalizarArea(c.practice_area)).filter((a): a is string => !!a),
+  )].sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  // Qual processo pertence a qual área.
+  const areaDoCaso = new Map(casos.map((c) => [c.id, normalizarArea(c.practice_area)]));
+
+  // Movimento sem processo vinculado continua entrando em qualquer área: não
+  // há como saber a que área ele pertence, e tirá-lo faria o total encolher
+  // sem explicação.
   const naArea = (caseId: string | null | undefined) =>
-    area !== "trabalhista" || !caseId || !casosCiveis.has(caseId);
+    area === "" || !caseId || areaDoCaso.get(caseId) === area;
 
   // Quantos clientes distintos efetivamente pagaram alguma coisa no período —
   // é a base tanto do custo por cliente quanto da receita média por cliente.
@@ -449,14 +489,14 @@ function Dashboard() {
     clientesComResultado > 0 ? aReceberComResultado / clientesComResultado : 0;
   const mediaBrutoPorCliente =
     clientesComResultado > 0 ? brutoComResultado / clientesComResultado : 0;
-  // Quantos casos o filtro está deixando de fora, para o número não sumir sem
-  // explicação de uma tela para a outra.
-  const civeisForaDaConta = d.receivables.filter(
+  // Quantos acordos o filtro está deixando de fora, para o número não sumir
+  // sem explicação de uma tela para a outra.
+  const foraDaArea = d.receivables.filter(
     (r) =>
       (r.type === "acordo" || r.type === "sentenca") &&
       r.status !== "cancelado" &&
       !!r.case_id &&
-      casosCiveis.has(r.case_id as string),
+      !naArea(r.case_id as string),
   ).length;
 
   const totalBank = d.banks.reduce((s, b) => s + num(b.balance as number), 0);
@@ -737,36 +777,27 @@ function Dashboard() {
               Honorários menos despesas, sem empréstimo. Diz se o escritório se paga.
             </p>
           </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Operação por processo ativo</p>
-            <p className="num mt-1 text-xl font-semibold">
-              {periodLoading ? "…" : money(profitPerCase)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">{activeCases} processo(s) ativo(s)</p>
-          </div>
         </div>
 
-        {/* Duas opções só: o escritório é de trabalhista, e o cível é a
-            exceção que se quer tirar da conta. */}
+        {/* As áreas vêm dos próprios processos. */}
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground uppercase">Área do direito</span>
-          {[
-            ["", "Todas"],
-            ["trabalhista", "Trabalhista"],
-          ].map(([valor, rotulo]) => (
-            <button
-              key={valor}
-              type="button"
-              onClick={() => escolherArea(valor!)}
-              className={`rounded-md border px-3 py-1 text-xs ${
-                area === valor
-                  ? "border-primary bg-primary/10 text-foreground"
-                  : "border-border text-muted-foreground"
-              }`}
-            >
-              {rotulo}
-            </button>
-          ))}
+          {[["", "Todas"] as const, ...areasDisponiveis.map((a) => [a, rotuloArea(a)] as const)].map(
+            ([valor, rotulo]) => (
+              <button
+                key={valor || "todas"}
+                type="button"
+                onClick={() => escolherArea(valor)}
+                className={`rounded-md border px-3 py-1 text-xs ${
+                  area === valor
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border text-muted-foreground"
+                }`}
+              >
+                {rotulo}
+              </button>
+            ),
+          )}
         </div>
 
         {/* Ações com resultado: é aqui que mora a média por cliente que
@@ -808,11 +839,11 @@ function Dashboard() {
           </div>
         </div>
 
-        {area && civeisForaDaConta > 0 && (
+        {area && foraDaArea > 0 && (
           <div className="mt-3 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
-            {civeisForaDaConta} acordo(s)/sentença(s) de cível estão fora desta conta. Tudo o mais
-            conta como trabalhista, inclusive acordo sem processo vinculado — para tirar um caso
-            daqui, marque a área do processo como Cível em Processos.
+            {foraDaArea} acordo(s)/sentença(s) de outras áreas estão fora desta conta. Acordo sem
+            processo vinculado continua entrando, porque não há como saber a área dele — para
+            separar um caso, preencha a área do processo em Processos.
           </div>
         )}
 
@@ -891,7 +922,20 @@ function Dashboard() {
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Card label="Saldo em contas" value={money(totalBank)} to="/caixa" />
+        {/* Parte do saldo é dinheiro de cliente que ainda não foi repassado.
+            Sem este aviso, quem abre o dashboard lê o saldo como se fosse
+            todo do escritório. */}
+        <Card
+          label="Saldo em contas"
+          value={money(totalBank)}
+          hint={
+            pendingTransfer > 0.01
+              ? `Inclui ${money(pendingTransfer)} de clientes ainda não repassados`
+              : "Nenhum repasse pendente"
+          }
+          tone={pendingTransfer > 0.01 ? "warning" : "default"}
+          to="/caixa"
+        />
         <Card
           label="Receita realizada do escritório"
           value={money(firmRevenue)}
