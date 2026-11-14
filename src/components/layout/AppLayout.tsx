@@ -60,10 +60,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
       >
         <div className="flex items-center justify-between border-b border-sidebar-border px-5 py-4">
           <div>
-            <p className="font-display text-sm font-semibold tracking-tight">
-              Hoffmann &amp; Tomazzoni
-            </p>
-            <p className="text-xs text-sidebar-foreground/60">Gestão Financeira</p>
+            {/* A versão branca do logo, que é a que existe para fundo escuro. */}
+            <img
+              src="/marca/logo-branco.svg"
+              alt="Hoffmann &amp; Tomazzoni"
+              className="h-7 w-auto"
+            />
+            <p className="mt-1 text-xs text-sidebar-foreground/60">Gestão Financeira</p>
           </div>
           <button className="lg:hidden" onClick={() => setOpen(false)} aria-label="Fechar menu">
             <X className="size-5" />

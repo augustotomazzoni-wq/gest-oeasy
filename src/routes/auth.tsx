@@ -127,8 +127,12 @@ function AuthPage() {
     <div className="grid min-h-screen lg:grid-cols-2">
       <div className="hidden flex-col justify-between bg-sidebar p-12 text-sidebar-foreground lg:flex">
         <div>
-          <p className="font-display text-lg font-semibold">Hoffmann &amp; Tomazzoni</p>
-          <p className="text-sm text-sidebar-foreground/60">Gestão Financeira</p>
+          <img
+            src="/marca/logo-branco.svg"
+            alt="Hoffmann &amp; Tomazzoni"
+            className="h-9 w-auto"
+          />
+          <p className="mt-2 text-sm text-sidebar-foreground/60">Gestão Financeira</p>
         </div>
         <div className="max-w-sm">
           <h2 className="font-display text-3xl leading-tight font-semibold">
