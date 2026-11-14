@@ -36,6 +36,8 @@ import {
 } from "@/lib/format";
 import { friendlyError, throwFirstError } from "@/lib/errors";
 import { PeriodFilter } from "@/components/PeriodFilter";
+import { useDashboardPrefs } from "@/lib/dashboard-prefs";
+import { useAuth } from "@/hooks/useAuth";
 import { periodLabel, periodRange, type PeriodType } from "@/lib/period";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -82,37 +84,34 @@ function useDashboardData() {
     queryFn: async () => {
       const [inst, balances, banks, txs, receivables, allCases, clients, receipts] =
         await Promise.all([
-        supabase.from("v_installments").select("*"),
-        supabase.from("v_client_balances").select("*"),
-        supabase.from("v_bank_balances").select("*"),
-        supabase
-          .from("financial_transactions")
-          .select("id, type, amount, paid_on, status, description, is_financing, source_type")
-          .eq("status", "pago"),
-        supabase
-          .from("legal_receivables")
-          .select(
-            "id, status, type, is_estimated, expected_firm_amount, gross_amount, description, client_id, case_id",
-          )
-          .is("deleted_at", null),
-        // Os processos vêm inteiros (e não só contados) porque é neles que
-        // está a área do direito — é ela que separa trabalhista de cível nas
-        // métricas por cliente.
-        supabase
-          .from("cases")
-          .select("id, practice_area, status")
-          .is("deleted_at", null),
-        supabase.from("clients").select("id, name").is("deleted_at", null),
-        // O dinheiro de terceiros precisa vir do recebimento, não da parcela:
-        // a parcela só sabe quanto é da cliente, não se passou pela conta do
-        // escritório ou se ela recebeu direto da empresa.
-        supabase
-          .from("receipts")
-          .select(
-            "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
-          )
-          .is("reversed_at", null),
-      ]);
+          supabase.from("v_installments").select("*"),
+          supabase.from("v_client_balances").select("*"),
+          supabase.from("v_bank_balances").select("*"),
+          supabase
+            .from("financial_transactions")
+            .select("id, type, amount, paid_on, status, description, is_financing, source_type")
+            .eq("status", "pago"),
+          supabase
+            .from("legal_receivables")
+            .select(
+              "id, status, type, is_estimated, expected_firm_amount, gross_amount, description, client_id, case_id",
+            )
+            .is("deleted_at", null),
+          // Os processos vêm inteiros (e não só contados) porque é neles que
+          // está a área do direito — é ela que separa trabalhista de cível nas
+          // métricas por cliente.
+          supabase.from("cases").select("id, practice_area, status").is("deleted_at", null),
+          supabase.from("clients").select("id, name").is("deleted_at", null),
+          // O dinheiro de terceiros precisa vir do recebimento, não da parcela:
+          // a parcela só sabe quanto é da cliente, não se passou pela conta do
+          // escritório ou se ela recebeu direto da empresa.
+          supabase
+            .from("receipts")
+            .select(
+              "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
+            )
+            .is("reversed_at", null),
+        ]);
       throwFirstError(inst, balances, banks, txs, receivables, allCases, clients, receipts);
       return {
         installments: (inst.data ?? []) as unknown as InstallmentRow[],
@@ -282,11 +281,7 @@ function Card({
       <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{label}</p>
       <p
         className={`num mt-2 font-display text-2xl font-semibold ${
-          tone === "danger"
-            ? "text-destructive"
-            : tone === "success"
-              ? "text-success"
-              : ""
+          tone === "danger" ? "text-destructive" : tone === "success" ? "text-success" : ""
         }`}
       >
         {value}
@@ -321,6 +316,9 @@ function Card({
 function Dashboard() {
   const { data, isLoading, error } = useDashboardData();
   const today = todayISO();
+  // Cada pessoa esconde o que não usa, em Configurações.
+  const { profile } = useAuth();
+  const { mostrar } = useDashboardPrefs(profile?.id);
 
   // Área do direito das métricas por cliente. Fica guardada no navegador para
   // não ter que reescolher a área toda vez que abrir o dashboard.
@@ -434,8 +432,7 @@ function Dashboard() {
   const entradasDoPeriodo = (periodData?.txs ?? []).filter(
     (t) => t.type === "entrada" && !ehTransferencia(t),
   );
-  const somar = (rows: typeof entradasDoPeriodo) =>
-    rows.reduce((s, t) => s + num(t.amount), 0);
+  const somar = (rows: typeof entradasDoPeriodo) => rows.reduce((s, t) => s + num(t.amount), 0);
   const entradasDeParcelas = somar(
     entradasDoPeriodo.filter((t) => !t.is_financing && t.source_type === "receipt"),
   );
@@ -460,8 +457,7 @@ function Dashboard() {
   // o objeto antigo, em que o campo ainda não existe — e a tela cai inteira.
   const casos = d.cases ?? [];
   const nomePorCliente = new Map((d.clients ?? []).map((c) => [c.id, c.name]));
-  const nomeDoCliente = (id: string | null | undefined) =>
-    (id && nomePorCliente.get(id)) || "—";
+  const nomeDoCliente = (id: string | null | undefined) => (id && nomePorCliente.get(id)) || "—";
 
   // O escritório é de trabalhista: o cível é a exceção, e são pouquíssimos
   // casos. Por isso a regra é pela negativa — trabalhista é tudo que não está
@@ -472,9 +468,9 @@ function Dashboard() {
   // de uma lista fixa no código. Antes ele procurava "cível" e, como nenhum
   // processo é cível, escolher "Trabalhista" não mudava número nenhum: o
   // filtro existia mas não filtrava.
-  const areasDisponiveis = [...new Set(
-    casos.map((c) => normalizarArea(c.practice_area)).filter((a): a is string => !!a),
-  )].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const areasDisponiveis = [
+    ...new Set(casos.map((c) => normalizarArea(c.practice_area)).filter((a): a is string => !!a)),
+  ].sort((a, b) => a.localeCompare(b, "pt-BR"));
 
   // Qual processo pertence a qual área.
   const areaDoCaso = new Map(casos.map((c) => [c.id, normalizarArea(c.practice_area)]));
@@ -739,129 +735,130 @@ function Dashboard() {
         description="Visão consolidada do caixa, dos recebíveis e dos valores de clientes."
       />
 
-      <div className="panel mb-6 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="font-display text-sm font-semibold">Resultado do período</h2>
-            <p className="text-xs text-muted-foreground">
-              Só a parte do escritório — o valor que pertence à cliente fica de fora.
-            </p>
+      {mostrar("periodo") && (
+        <div className="panel mb-6 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-semibold">Resultado do período</h2>
+              <p className="text-xs text-muted-foreground">
+                Só a parte do escritório — o valor que pertence à cliente fica de fora.
+              </p>
+            </div>
+            <PeriodFilter
+              type={periodType}
+              onTypeChange={setPeriodType}
+              anchor={anchor}
+              onAnchorChange={setAnchor}
+              customStart={customStart}
+              customEnd={customEnd}
+              onCustomStartChange={setCustomStart}
+              onCustomEndChange={setCustomEnd}
+            />
           </div>
-          <PeriodFilter
-            type={periodType}
-            onTypeChange={setPeriodType}
-            anchor={anchor}
-            onAnchorChange={setAnchor}
-            customStart={customStart}
-            customEnd={customEnd}
-            onCustomStartChange={setCustomStart}
-            onCustomEndChange={setCustomEnd}
-          />
-        </div>
 
-        <p className="num mt-3 text-sm text-muted-foreground">
-          {periodLabel(periodType, anchor, custom)}
-        </p>
+          <p className="num mt-3 text-sm text-muted-foreground">
+            {periodLabel(periodType, anchor, custom)}
+          </p>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Receita do escritório</p>
-            <p className="num mt-1 text-xl font-semibold text-success">
-              {periodLoading ? "…" : money(periodFirmRevenue)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">Honorários + sucumbência</p>
-          </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Total que entrou no caixa</p>
-            <p className="num mt-1 text-xl font-semibold text-success">
-              {periodLoading ? "…" : money(periodCashIn)}
-            </p>
-            {/* A composição fica à vista: sem ela, ninguém consegue conferir
-                o total, e um número que não se confere não se usa. */}
-            <ul className="mt-2 flex flex-col gap-0.5 text-xs text-muted-foreground">
-              <li className="flex justify-between gap-2">
-                <span>Baixas de parcela, sem a parte da cliente</span>
-                <span className="num">{money(entradasDeParcelas)}</span>
-              </li>
-              {periodFinancingIn > 0.01 && (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Receita do escritório</p>
+              <p className="num mt-1 text-xl font-semibold text-success">
+                {periodLoading ? "…" : money(periodFirmRevenue)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">Honorários + sucumbência</p>
+            </div>
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Total que entrou no caixa</p>
+              <p className="num mt-1 text-xl font-semibold text-success">
+                {periodLoading ? "…" : money(periodCashIn)}
+              </p>
+              {/* A composição fica à vista: sem ela, ninguém consegue conferir
+                  o total, e um número que não se confere não se usa. */}
+              <ul className="mt-2 flex flex-col gap-0.5 text-xs text-muted-foreground">
                 <li className="flex justify-between gap-2">
-                  <span>Empréstimos e aportes</span>
-                  <span className="num">{money(periodFinancingIn)}</span>
+                  <span>Baixas de parcela, sem a parte da cliente</span>
+                  <span className="num">{money(entradasDeParcelas)}</span>
                 </li>
-              )}
+                {periodFinancingIn > 0.01 && (
+                  <li className="flex justify-between gap-2">
+                    <span>Empréstimos e aportes</span>
+                    <span className="num">{money(periodFinancingIn)}</span>
+                  </li>
+                )}
+                {outrasEntradas > 0.01 && (
+                  <li className="flex justify-between gap-2">
+                    <span>Outras entradas lançadas no caixa</span>
+                    <span className="num">{money(outrasEntradas)}</span>
+                  </li>
+                )}
+              </ul>
               {outrasEntradas > 0.01 && (
-                <li className="flex justify-between gap-2">
-                  <span>Outras entradas lançadas no caixa</span>
-                  <span className="num">{money(outrasEntradas)}</span>
-                </li>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  “Outras entradas” são lançamentos feitos direto no caixa ou vindos da importação,
+                  que não nasceram de baixa de parcela. Veja quais em{" "}
+                  <Link to="/caixa" className="underline underline-offset-2">
+                    Fluxo de Caixa
+                  </Link>{" "}
+                  com o filtro “Só receitas”.
+                </p>
               )}
-            </ul>
-            {outrasEntradas > 0.01 && (
+              {receitaForaDoCaixa > 0.01 && (
+                <p className="mt-2 text-xs text-warning">
+                  <strong className="num">{money(receitaForaDoCaixa)}</strong> de honorários contam
+                  como receita do período mas não entraram na conta: são recebimentos sem valor em
+                  conta do escritório — normalmente os que vieram da importação, já recebidos antes
+                  de o sistema existir.
+                </p>
+              )}
               <p className="mt-2 text-xs text-muted-foreground">
-                “Outras entradas” são lançamentos feitos direto no caixa ou vindos da importação,
-                que não nasceram de baixa de parcela. Veja quais em{" "}
-                <Link to="/caixa" className="underline underline-offset-2">
-                  Fluxo de Caixa
-                </Link>{" "}
-                com o filtro “Só receitas”.
+                O dinheiro das clientes entra no caixa em linha própria e não é somado aqui. Um
+                lançamento manual que seja de cliente, porém, o sistema não tem como reconhecer.
               </p>
-            )}
-            {receitaForaDoCaixa > 0.01 && (
-              <p className="mt-2 text-xs text-warning">
-                <strong className="num">{money(receitaForaDoCaixa)}</strong> de honorários contam
-                como receita do período mas não entraram na conta: são recebimentos sem valor em
-                conta do escritório — normalmente os que vieram da importação, já recebidos antes
-                de o sistema existir.
+            </div>
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Despesas pagas</p>
+              <p className="num mt-1 text-xl font-semibold text-destructive">
+                {periodLoading ? "…" : money(periodExpenses)}
               </p>
-            )}
-            <p className="mt-2 text-xs text-muted-foreground">
-              O dinheiro das clientes entra no caixa em linha própria e não é somado aqui. Um
-              lançamento manual que seja de cliente, porém, o sistema não tem como reconhecer.
-            </p>
+              <p className="mt-1 text-xs text-muted-foreground">Sem as parcelas de empréstimo</p>
+            </div>
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Resultado do caixa</p>
+              <p
+                className={`num mt-1 text-xl font-semibold ${
+                  resultadoDeCaixa >= 0 ? "text-success" : "text-destructive"
+                }`}
+              >
+                {periodLoading ? "…" : money(resultadoDeCaixa)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Tudo que entrou menos tudo que saiu, empréstimo incluído dos dois lados. É o mesmo
+                número do Fluxo de Caixa.
+              </p>
+            </div>
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Resultado da operação</p>
+              <p
+                className={`num mt-1 text-xl font-semibold ${
+                  periodProfit >= 0 ? "text-success" : "text-destructive"
+                }`}
+              >
+                {periodLoading ? "…" : money(periodProfit)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Honorários menos despesas, sem empréstimo. Diz se o escritório se paga.
+              </p>
+            </div>
           </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Despesas pagas</p>
-            <p className="num mt-1 text-xl font-semibold text-destructive">
-              {periodLoading ? "…" : money(periodExpenses)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Sem as parcelas de empréstimo
-            </p>
-          </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Resultado do caixa</p>
-            <p
-              className={`num mt-1 text-xl font-semibold ${
-                resultadoDeCaixa >= 0 ? "text-success" : "text-destructive"
-              }`}
-            >
-              {periodLoading ? "…" : money(resultadoDeCaixa)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Tudo que entrou menos tudo que saiu, empréstimo incluído dos dois lados. É o mesmo
-              número do Fluxo de Caixa.
-            </p>
-          </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Resultado da operação</p>
-            <p
-              className={`num mt-1 text-xl font-semibold ${
-                periodProfit >= 0 ? "text-success" : "text-destructive"
-              }`}
-            >
-              {periodLoading ? "…" : money(periodProfit)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Honorários menos despesas, sem empréstimo. Diz se o escritório se paga.
-            </p>
-          </div>
-        </div>
 
-        {/* As áreas vêm dos próprios processos. */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground uppercase">Área do direito</span>
-          {[["", "Todas"] as const, ...areasDisponiveis.map((a) => [a, rotuloArea(a)] as const)].map(
-            ([valor, rotulo]) => (
+          {/* As áreas vêm dos próprios processos. */}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground uppercase">Área do direito</span>
+            {[
+              ["", "Todas"] as const,
+              ...areasDisponiveis.map((a) => [a, rotuloArea(a)] as const),
+            ].map(([valor, rotulo]) => (
               <button
                 key={valor || "todas"}
                 type="button"
@@ -874,219 +871,243 @@ function Dashboard() {
               >
                 {rotulo}
               </button>
-            ),
-          )}
-        </div>
+            ))}
+          </div>
 
-        {/* Ações com resultado: é aqui que mora a média por cliente que
-            interessa — só o que já virou acordo ou sentença. */}
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Clientes com resultado</p>
-            <p className="num mt-1 text-xl font-semibold">{clientesComResultado}</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {area ? "Acordo ou sentença na trabalhista" : "Com acordo ou sentença"}
-            </p>
-          </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">O escritório vai receber</p>
-            <p className="num mt-1 text-xl font-semibold text-success">
-              {money(aReceberComResultado)}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Honorários + sucumbência das ações já decididas
-            </p>
-          </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Média por cliente</p>
-            <p className="num mt-1 text-xl font-semibold text-success">
-              {clientesComResultado > 0 ? money(mediaPorClienteComResultado) : "—"}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              O que o escritório recebe, em média, por cliente com resultado
-            </p>
-          </div>
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Conseguido para as clientes</p>
-            <p className="num mt-1 text-xl font-semibold">{money(brutoComResultado)}</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {clientesComResultado > 0
-                ? `Média de ${money(mediaBrutoPorCliente)} por cliente`
-                : "Valor bruto das ações"}
-            </p>
-          </div>
-        </div>
-
-        {area && foraDaArea > 0 && (
-          <div className="mt-3 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
-            {foraDaArea} acordo(s)/sentença(s) de outras áreas estão fora desta conta. Acordo sem
-            processo vinculado continua entrando, porque não há como saber a área dele — para
-            separar um caso, preencha a área do processo em Processos.
-          </div>
-        )}
-
-        {/* Indicadores por cliente pagante: a base dos dois é a mesma — quantos
-            clientes distintos colocaram dinheiro no escritório no período. */}
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Clientes que pagaram</p>
-            <p className="num mt-1 text-xl font-semibold">{periodLoading ? "…" : payingCount}</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Clientes distintos com recebimento no período
-              {area ? ", na trabalhista" : ""}
-            </p>
-          </div>
-          {/* Despesa do escritório não se divide por área do direito, então
-              rateá-la só entre os clientes de uma área daria um número
-              inventado. Com filtro ligado, o card sai de cena. */}
-          {!area && (
+          {/* Ações com resultado: é aqui que mora a média por cliente que
+              interessa — só o que já virou acordo ou sentença. */}
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <div className="panel p-4">
-              <p className="text-xs text-muted-foreground uppercase">Custo por cliente</p>
-              <p className="num mt-1 text-xl font-semibold text-destructive">
-                {periodLoading ? "…" : payingCount > 0 ? money(costPerClient) : "—"}
-              </p>
+              <p className="text-xs text-muted-foreground uppercase">Clientes com resultado</p>
+              <p className="num mt-1 text-xl font-semibold">{clientesComResultado}</p>
               <p className="mt-1 text-xs text-muted-foreground">
-                Despesas do período ÷ clientes que pagaram
+                {area ? "Acordo ou sentença na trabalhista" : "Com acordo ou sentença"}
               </p>
             </div>
-          )}
-          <div className="panel p-4">
-            <p className="text-xs text-muted-foreground uppercase">Receita média por cliente</p>
-            <p className="num mt-1 text-xl font-semibold text-success">
-              {periodLoading ? "…" : payingCount > 0 ? money(revenuePerClient) : "—"}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {area ? "Receita da trabalhista" : "Receita do escritório"} ÷ clientes que pagaram
-            </p>
-          </div>
-          {!area && (
             <div className="panel p-4">
-              <p className="text-xs text-muted-foreground uppercase">Lucro por cliente</p>
-              <p
-                className={`num mt-1 text-xl font-semibold ${
-                  profitPerClient >= 0 ? "text-success" : "text-destructive"
-                }`}
-              >
-                {periodLoading ? "…" : payingCount > 0 ? money(profitPerClient) : "—"}
+              <p className="text-xs text-muted-foreground uppercase">O escritório vai receber</p>
+              <p className="num mt-1 text-xl font-semibold text-success">
+                {money(aReceberComResultado)}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
-                Receita por cliente − custo por cliente
+                Honorários + sucumbência das ações já decididas
               </p>
             </div>
-          )}
-        </div>
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Média por cliente</p>
+              <p className="num mt-1 text-xl font-semibold text-success">
+                {clientesComResultado > 0 ? money(mediaPorClienteComResultado) : "—"}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                O que o escritório recebe, em média, por cliente com resultado
+              </p>
+            </div>
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Conseguido para as clientes</p>
+              <p className="num mt-1 text-xl font-semibold">{money(brutoComResultado)}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {clientesComResultado > 0
+                  ? `Média de ${money(mediaBrutoPorCliente)} por cliente`
+                  : "Valor bruto das ações"}
+              </p>
+            </div>
+          </div>
 
-        {(periodFinancingIn > 0.01 || periodFinancingOut > 0.01) && (
+          {area && foraDaArea > 0 && (
+            <div className="mt-3 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs">
+              {foraDaArea} acordo(s)/sentença(s) de outras áreas estão fora desta conta. Acordo sem
+              processo vinculado continua entrando, porque não há como saber a área dele — para
+              separar um caso, preencha a área do processo em Processos.
+            </div>
+          )}
+
+          {/* Indicadores por cliente pagante: a base dos dois é a mesma — quantos
+              clientes distintos colocaram dinheiro no escritório no período. */}
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Clientes que pagaram</p>
+              <p className="num mt-1 text-xl font-semibold">{periodLoading ? "…" : payingCount}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Clientes distintos com recebimento no período
+                {area ? ", na trabalhista" : ""}
+              </p>
+            </div>
+            {/* Despesa do escritório não se divide por área do direito, então
+                rateá-la só entre os clientes de uma área daria um número
+                inventado. Com filtro ligado, o card sai de cena. */}
+            {!area && (
+              <div className="panel p-4">
+                <p className="text-xs text-muted-foreground uppercase">Custo por cliente</p>
+                <p className="num mt-1 text-xl font-semibold text-destructive">
+                  {periodLoading ? "…" : payingCount > 0 ? money(costPerClient) : "—"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Despesas do período ÷ clientes que pagaram
+                </p>
+              </div>
+            )}
+            <div className="panel p-4">
+              <p className="text-xs text-muted-foreground uppercase">Receita média por cliente</p>
+              <p className="num mt-1 text-xl font-semibold text-success">
+                {periodLoading ? "…" : payingCount > 0 ? money(revenuePerClient) : "—"}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {area ? "Receita da trabalhista" : "Receita do escritório"} ÷ clientes que pagaram
+              </p>
+            </div>
+            {!area && (
+              <div className="panel p-4">
+                <p className="text-xs text-muted-foreground uppercase">Lucro por cliente</p>
+                <p
+                  className={`num mt-1 text-xl font-semibold ${
+                    profitPerClient >= 0 ? "text-success" : "text-destructive"
+                  }`}
+                >
+                  {periodLoading ? "…" : payingCount > 0 ? money(profitPerClient) : "—"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Receita por cliente − custo por cliente
+                </p>
+              </div>
+            )}
+          </div>
+
+          {(periodFinancingIn > 0.01 || periodFinancingOut > 0.01) && (
+            <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+              Empréstimos no período: entrou{" "}
+              <strong className="num text-foreground">{money(periodFinancingIn)}</strong> e saiu{" "}
+              <strong className="num text-foreground">{money(periodFinancingOut)}</strong>. Isso
+              conta no resultado do caixa, porque mexe no saldo das contas, e fica de fora do
+              resultado da operação e do custo por cliente — empréstimo não é receita nem custo de
+              operar, é dinheiro emprestado indo e voltando.
+            </div>
+          )}
+
           <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-            Empréstimos no período: entrou{" "}
-            <strong className="num text-foreground">{money(periodFinancingIn)}</strong> e saiu{" "}
-            <strong className="num text-foreground">{money(periodFinancingOut)}</strong>. Isso
-            conta no resultado do caixa, porque mexe no saldo das contas, e fica de fora do
-            resultado da operação e do custo por cliente — empréstimo não é receita nem custo de
-            operar, é dinheiro emprestado indo e voltando.
+            Neste período,{" "}
+            <strong className="num text-foreground">{money(periodClientReceived)}</strong> pertencem
+            às clientes e não entram nas contas acima — é dinheiro de terceiros que ainda vai (ou já
+            foi) para{" "}
+            <Link to="/repasses" className="underline underline-offset-2">
+              Repasses a Clientes
+            </Link>
+            .
           </div>
-        )}
-
-        <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-          Neste período,{" "}
-          <strong className="num text-foreground">{money(periodClientReceived)}</strong> pertencem
-          às clientes e não entram nas contas acima — é dinheiro de terceiros que ainda vai (ou já
-          foi) para{" "}
-          <Link to="/repasses" className="underline underline-offset-2">
-            Repasses a Clientes
-          </Link>
-          .
         </div>
-      </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {/* Parte do saldo é dinheiro de cliente que ainda não foi repassado.
             Sem este aviso, quem abre o dashboard lê o saldo como se fosse
             todo do escritório. */}
-        <Card
-          label="Saldo em contas"
-          value={money(totalBank)}
-          hint={
-            pendingTransfer > 0.01
-              ? `Inclui ${money(pendingTransfer)} de clientes ainda não repassados`
-              : "Nenhum repasse pendente"
-          }
-          tone={pendingTransfer > 0.01 ? "warning" : "default"}
-          to="/caixa"
-        />
-        <Card
-          label="Receita realizada do escritório"
-          value={money(firmRevenue)}
-          hint="Honorários + sucumbência recebidos"
-          tone="success"
-        />
-        <Card
-          label="Despesas pagas"
-          value={money(expenses)}
-          hint="Sem as parcelas de empréstimo"
-          to="/caixa"
-        />
-        <Card
-          label="Resultado de caixa"
-          value={money(firmRevenue - expenses)}
-          tone={firmRevenue - expenses >= 0 ? "success" : "danger"}
-        />
-        <Card
-          label="Aguardando repasse"
-          value={money(pendingTransfer)}
-          hint="Dinheiro de clientes — não é receita"
-          to="/repasses"
-        />
-        <Card label="Já repassado" value={money(transferred)} to="/repasses" />
-        <Card
-          label="Recebíveis confirmados"
-          value={money(openFirmExpected)}
-          hint="Parte do escritório em aberto"
-          to="/parcelas"
-        />
-        <Card
-          label="Recebíveis estimados"
-          value={money(estimated)}
-          hint="A confirmar — fora do caixa"
-          to="/acordos"
-        />
+        {mostrar("saldo") && (
+          <Card
+            label="Saldo em contas"
+            value={money(totalBank)}
+            hint={
+              pendingTransfer > 0.01
+                ? `Inclui ${money(pendingTransfer)} de clientes ainda não repassados`
+                : "Nenhum repasse pendente"
+            }
+            tone={pendingTransfer > 0.01 ? "warning" : "default"}
+            to="/caixa"
+          />
+        )}
+        {mostrar("receita") && (
+          <Card
+            label="Receita realizada do escritório"
+            value={money(firmRevenue)}
+            hint="Honorários + sucumbência recebidos"
+            tone="success"
+          />
+        )}
+        {mostrar("despesas") && (
+          <Card
+            label="Despesas pagas"
+            value={money(expenses)}
+            hint="Sem as parcelas de empréstimo"
+            to="/caixa"
+          />
+        )}
+        {mostrar("resultado") && (
+          <Card
+            label="Resultado de caixa"
+            value={money(firmRevenue - expenses)}
+            tone={firmRevenue - expenses >= 0 ? "success" : "danger"}
+          />
+        )}
+        {mostrar("aguardando") && (
+          <Card
+            label="Aguardando repasse"
+            value={money(pendingTransfer)}
+            hint="Dinheiro de clientes — não é receita"
+            to="/repasses"
+          />
+        )}
+        {mostrar("repassado") && (
+          <Card label="Já repassado" value={money(transferred)} to="/repasses" />
+        )}
+        {mostrar("confirmados") && (
+          <Card
+            label="Recebíveis confirmados"
+            value={money(openFirmExpected)}
+            hint="Parte do escritório em aberto"
+            to="/parcelas"
+          />
+        )}
+        {mostrar("estimados") && (
+          <Card
+            label="Recebíveis estimados"
+            value={money(estimated)}
+            hint="A confirmar — fora do caixa"
+            to="/acordos"
+          />
+        )}
         {/* Estes três mostram o valor cheio da parcela, que é o que se cobra
             da cliente. Os cards de recebíveis mostram só a parte do escritório
             — por isso o aviso, para ninguém somar um com o outro. */}
-        <Card
-          label="Parcelas atrasadas"
-          value={`${late.length} · ${money(sumBalance(late))}`}
-          hint="Valor cheio do acordo — cliente + escritório"
-          tone={late.length ? "danger" : "default"}
-          to="/parcelas"
-          search={{ filtro: "ATRASADA" }}
-        />
-        <Card
-          label="Vencem em 7 dias"
-          value={money(sumBalance(next7))}
-          hint="Valor cheio do acordo — cliente + escritório"
-          to="/parcelas"
-          search={{ filtro: "VENCE_7" }}
-        />
-        <Card
-          label="Vencem em 30 dias"
-          value={money(sumBalance(next30))}
-          hint="Valor cheio do acordo — cliente + escritório"
-          to="/parcelas"
-          search={{ filtro: "VENCE_30" }}
-        />
-        <Card
-          label="Terceiros recebidos"
-          value={money(thirdPartyReceived)}
-          hint={
-            thirdPartyDirect > 0.01
-              ? `Passaram pelo caixa — outros ${money(thirdPartyDirect)} foram direto às clientes`
-              : "Valores de clientes que passaram pelo caixa"
-          }
-        />
+        {mostrar("atrasadas") && (
+          <Card
+            label="Parcelas atrasadas"
+            value={`${late.length} · ${money(sumBalance(late))}`}
+            hint="Valor cheio do acordo — cliente + escritório"
+            tone={late.length ? "danger" : "default"}
+            to="/parcelas"
+            search={{ filtro: "ATRASADA" }}
+          />
+        )}
+        {mostrar("vence7") && (
+          <Card
+            label="Vencem em 7 dias"
+            value={money(sumBalance(next7))}
+            hint="Valor cheio do acordo — cliente + escritório"
+            to="/parcelas"
+            search={{ filtro: "VENCE_7" }}
+          />
+        )}
+        {mostrar("vence30") && (
+          <Card
+            label="Vencem em 30 dias"
+            value={money(sumBalance(next30))}
+            hint="Valor cheio do acordo — cliente + escritório"
+            to="/parcelas"
+            search={{ filtro: "VENCE_30" }}
+          />
+        )}
+        {mostrar("terceiros") && (
+          <Card
+            label="Terceiros recebidos"
+            value={money(thirdPartyReceived)}
+            hint={
+              thirdPartyDirect > 0.01
+                ? `Passaram pelo caixa — outros ${money(thirdPartyDirect)} foram direto às clientes`
+                : "Valores de clientes que passaram pelo caixa"
+            }
+          />
+        )}
       </div>
 
-      {alerts.length > 0 && (
+      {mostrar("alertas") && alerts.length > 0 && (
         <div className="panel mt-6 p-4">
           <h2 className="font-display text-sm font-semibold">Alertas</h2>
           <ul className="mt-3 space-y-2">
@@ -1106,190 +1127,202 @@ function Dashboard() {
       )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <div className="panel p-4">
-          <h2 className="font-display text-sm font-semibold">Previsão de recebimentos</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Só a parte do escritório — honorários e sucumbência ainda em aberto.
-          </p>
-          <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={forecast}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                <XAxis dataKey="mes" fontSize={12} />
-                <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
-                <Tooltip formatter={(v) => money(v as number)} />
-                <Bar dataKey="valor" fill="var(--color-chart-1)" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="panel p-4">
-          <h2 className="font-display text-sm font-semibold">Envelhecimento dos atrasos</h2>
-          <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={aging}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                <XAxis dataKey="faixa" fontSize={12} />
-                <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
-                <Tooltip formatter={(v) => money(v as number)} />
-                <Bar dataKey="valor" fill="var(--color-chart-5)" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="panel p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="font-display text-sm font-semibold">
-                Receita do escritório x valores de terceiros
-              </h2>
-              <p className="num mt-1 text-xs text-muted-foreground">
-                {periodLabel(mixType, mixAnchor, mixCustom)}
-              </p>
+        {mostrar("g_previsao") && (
+          <div className="panel p-4">
+            <h2 className="font-display text-sm font-semibold">Previsão de recebimentos</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Só a parte do escritório — honorários e sucumbência ainda em aberto.
+            </p>
+            <div className="mt-4 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={forecast}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                  <XAxis dataKey="mes" fontSize={12} />
+                  <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
+                  <Tooltip formatter={(v) => money(v as number)} />
+                  <Bar dataKey="valor" fill="var(--color-chart-1)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
-            <PeriodFilter
-              type={mixType}
-              onTypeChange={setMixType}
-              anchor={mixAnchor}
-              onAnchorChange={setMixAnchor}
-              customStart={mixStart}
-              customEnd={mixEnd}
-              onCustomStartChange={setMixStart}
-              onCustomEndChange={setMixEnd}
-            />
           </div>
-          <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={[
-                  { nome: "Escritório", valor: mixFirm },
-                  { nome: "Clientes — pela nossa conta", valor: mixThird },
-                  { nome: "Clientes — direto", valor: mixDirect },
-                ]}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                <XAxis dataKey="nome" fontSize={12} />
-                <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
-                <Tooltip formatter={(v) => money(v as number)} />
-                <Bar dataKey="valor" fill="var(--color-chart-2)" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {mixLoading
-              ? "Carregando…"
-              : `As clientes receberam ${money(mixThird + mixDirect)} no período: ` +
-                `${money(mixThird)} passaram pela conta do escritório e viram repasse, e ` +
-                `${money(mixDirect)} caíram direto na conta delas, sem passar por aqui.`}
-          </p>
-        </div>
+        )}
 
-        <div className="panel p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="font-display text-sm font-semibold">
-                Honorários do escritório por mês
-              </h2>
-              <p className="num mt-1 text-xs text-muted-foreground">
-                {periodLabel(honType, honAnchor, honCustom)}
-              </p>
+        {mostrar("g_atrasos") && (
+          <div className="panel p-4">
+            <h2 className="font-display text-sm font-semibold">Envelhecimento dos atrasos</h2>
+            <div className="mt-4 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={aging}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                  <XAxis dataKey="faixa" fontSize={12} />
+                  <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
+                  <Tooltip formatter={(v) => money(v as number)} />
+                  <Bar dataKey="valor" fill="var(--color-chart-5)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
-            <PeriodFilter
-              type={honType}
-              onTypeChange={setHonType}
-              anchor={honAnchor}
-              onAnchorChange={setHonAnchor}
-              customStart={honStart}
-              customEnd={honEnd}
-              onCustomStartChange={setHonStart}
-              onCustomEndChange={setHonEnd}
-            />
           </div>
-          <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={honorarios}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                <XAxis dataKey="mes" fontSize={12} />
-                <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
-                <Tooltip formatter={(v) => money(v as number)} />
-                <Legend />
-                <Bar
-                  dataKey="recebido"
-                  name="Já recebido"
-                  fill="var(--color-success)"
-                  radius={[4, 4, 0, 0]}
-                />
-                <Bar
-                  dataKey="aReceber"
-                  name="A receber"
-                  fill="var(--color-chart-1)"
-                  radius={[4, 4, 0, 0]}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {honLoading
-              ? "Carregando…"
-              : `No período: ${money(honRecebidoTotal)} recebidos e ${money(honAReceberTotal)} a receber. Só honorários e sucumbência — o dinheiro das clientes fica de fora.`}
-          </p>
-        </div>
+        )}
 
-        <div className="panel p-4">
-          <h2 className="font-display text-sm font-semibold">Parcelas por situação</h2>
-          <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={statusData} dataKey="value" nameKey="name" outerRadius={90}>
-                  {statusData.map((_, i) => (
-                    <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Legend />
-                <Tooltip formatter={(v) => money(v as number)} />
-              </PieChart>
-            </ResponsiveContainer>
+        {mostrar("g_mix") && (
+          <div className="panel p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-semibold">
+                  Receita do escritório x valores de terceiros
+                </h2>
+                <p className="num mt-1 text-xs text-muted-foreground">
+                  {periodLabel(mixType, mixAnchor, mixCustom)}
+                </p>
+              </div>
+              <PeriodFilter
+                type={mixType}
+                onTypeChange={setMixType}
+                anchor={mixAnchor}
+                onAnchorChange={setMixAnchor}
+                customStart={mixStart}
+                customEnd={mixEnd}
+                onCustomStartChange={setMixStart}
+                onCustomEndChange={setMixEnd}
+              />
+            </div>
+            <div className="mt-4 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={[
+                    { nome: "Escritório", valor: mixFirm },
+                    { nome: "Clientes — pela nossa conta", valor: mixThird },
+                    { nome: "Clientes — direto", valor: mixDirect },
+                  ]}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                  <XAxis dataKey="nome" fontSize={12} />
+                  <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
+                  <Tooltip formatter={(v) => money(v as number)} />
+                  <Bar dataKey="valor" fill="var(--color-chart-2)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {mixLoading
+                ? "Carregando…"
+                : `As clientes receberam ${money(mixThird + mixDirect)} no período: ` +
+                  `${money(mixThird)} passaram pela conta do escritório e viram repasse, e ` +
+                  `${money(mixDirect)} caíram direto na conta delas, sem passar por aqui.`}
+            </p>
           </div>
-        </div>
+        )}
+
+        {mostrar("g_honorarios") && (
+          <div className="panel p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-semibold">
+                  Honorários do escritório por mês
+                </h2>
+                <p className="num mt-1 text-xs text-muted-foreground">
+                  {periodLabel(honType, honAnchor, honCustom)}
+                </p>
+              </div>
+              <PeriodFilter
+                type={honType}
+                onTypeChange={setHonType}
+                anchor={honAnchor}
+                onAnchorChange={setHonAnchor}
+                customStart={honStart}
+                customEnd={honEnd}
+                onCustomStartChange={setHonStart}
+                onCustomEndChange={setHonEnd}
+              />
+            </div>
+            <div className="mt-4 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={honorarios}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                  <XAxis dataKey="mes" fontSize={12} />
+                  <YAxis fontSize={12} tickFormatter={(v) => money(v as number)} width={90} />
+                  <Tooltip formatter={(v) => money(v as number)} />
+                  <Legend />
+                  <Bar
+                    dataKey="recebido"
+                    name="Já recebido"
+                    fill="var(--color-success)"
+                    radius={[4, 4, 0, 0]}
+                  />
+                  <Bar
+                    dataKey="aReceber"
+                    name="A receber"
+                    fill="var(--color-chart-1)"
+                    radius={[4, 4, 0, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {honLoading
+                ? "Carregando…"
+                : `No período: ${money(honRecebidoTotal)} recebidos e ${money(honAReceberTotal)} a receber. Só honorários e sucumbência — o dinheiro das clientes fica de fora.`}
+            </p>
+          </div>
+        )}
+
+        {mostrar("g_situacao") && (
+          <div className="panel p-4">
+            <h2 className="font-display text-sm font-semibold">Parcelas por situação</h2>
+            <div className="mt-4 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={statusData} dataKey="value" nameKey="name" outerRadius={90}>
+                    {statusData.map((_, i) => (
+                      <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Legend />
+                  <Tooltip formatter={(v) => money(v as number)} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="panel mt-6 overflow-x-auto p-4">
-        <h2 className="font-display text-sm font-semibold">Próximos vencimentos</h2>
-        <table className="mt-3 w-full text-sm">
-          <thead>
-            <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
-              <th className="py-2">Vencimento</th>
-              <th>Cliente</th>
-              <th>Situação</th>
-              <th className="text-right">Saldo</th>
-            </tr>
-          </thead>
-          <tbody>
-            {next30
-              .sort((a, b) => (a.due_date ?? "").localeCompare(b.due_date ?? ""))
-              .slice(0, 8)
-              .map((i) => (
-                <tr key={i.id} className="border-b border-border/60 last:border-0">
-                  <td className="py-2">{dateBR(i.due_date)}</td>
-                  <td className="font-medium">{nomeDoCliente(i.client_id)}</td>
-                  <td>
-                    <StatusBadge status={i.status} />
-                  </td>
-                  <td className="num text-right">{money(i.balance)}</td>
-                </tr>
-              ))}
-            {next30.length === 0 && (
-              <tr>
-                <td colSpan={4} className="py-4 text-center text-muted-foreground">
-                  Nenhum vencimento nos próximos 30 dias.
-                </td>
+      {mostrar("proximos") && (
+        <div className="panel mt-6 overflow-x-auto p-4">
+          <h2 className="font-display text-sm font-semibold">Próximos vencimentos</h2>
+          <table className="mt-3 w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
+                <th className="py-2">Vencimento</th>
+                <th>Cliente</th>
+                <th>Situação</th>
+                <th className="text-right">Saldo</th>
               </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {next30
+                .sort((a, b) => (a.due_date ?? "").localeCompare(b.due_date ?? ""))
+                .slice(0, 8)
+                .map((i) => (
+                  <tr key={i.id} className="border-b border-border/60 last:border-0">
+                    <td className="py-2">{dateBR(i.due_date)}</td>
+                    <td className="font-medium">{nomeDoCliente(i.client_id)}</td>
+                    <td>
+                      <StatusBadge status={i.status} />
+                    </td>
+                    <td className="num text-right">{money(i.balance)}</td>
+                  </tr>
+                ))}
+              {next30.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="py-4 text-center text-muted-foreground">
+                    Nenhum vencimento nos próximos 30 dias.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
     </>
   );
 }

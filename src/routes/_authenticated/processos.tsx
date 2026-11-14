@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
+import { BotaoAdvbox } from "@/components/BotaoAdvbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -255,118 +256,122 @@ function ProcessosPage() {
         description="Processos e casos vinculados aos clientes do escritório."
         action={
           canWrite && (
-            <Dialog
-              open={open}
-              onOpenChange={(v) => {
-                setOpen(v);
-                if (!v) {
-                  setEditingId(null);
-                  setForm(EMPTY);
-                }
-              }}
-            >
-              <DialogTrigger asChild>
-                <Button
-                  onClick={() => {
+            <div className="flex flex-wrap gap-2">
+              {/* Nada vem da Advbox sozinho: só quando este botão é apertado. */}
+              <BotaoAdvbox tipo="processos" recarregar={["processos", "clientes"]} />
+              <Dialog
+                open={open}
+                onOpenChange={(v) => {
+                  setOpen(v);
+                  if (!v) {
                     setEditingId(null);
                     setForm(EMPTY);
-                  }}
-                >
-                  Novo processo
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-h-[85vh] overflow-y-auto">
-                <DialogHeader>
-                  <DialogTitle>{editingId ? "Editar processo" : "Novo processo"}</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-3">
-                  <div className="space-y-2">
-                    <Label>Cliente</Label>
-                    <Select
-                      value={form.client_id}
-                      onValueChange={(v) => setForm({ ...form, client_id: v })}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Selecione o cliente" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(data?.clients ?? []).map((c) => (
-                          <SelectItem key={c.id} value={c.id}>
-                            {c.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="num">Nº do processo</Label>
-                      <Input
-                        id="num"
-                        value={form.case_number}
-                        onChange={(e) => setForm({ ...form, case_number: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="rec">Reclamado / parte contrária</Label>
-                      <Input
-                        id="rec"
-                        value={form.opposing_party}
-                        onChange={(e) => setForm({ ...form, opposing_party: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="court">Tribunal / vara</Label>
-                      <Input
-                        id="court"
-                        value={form.court}
-                        onChange={(e) => setForm({ ...form, court: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="area">Área do direito</Label>
-                      <Input
-                        id="area"
-                        value={form.practice_area}
-                        onChange={(e) => setForm({ ...form, practice_area: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="acao">Tipo de ação</Label>
-                      <Input
-                        id="acao"
-                        value={form.action_type}
-                        onChange={(e) => setForm({ ...form, action_type: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="adv">Advogado responsável</Label>
-                      <Input
-                        id="adv"
-                        value={form.responsible_lawyer}
-                        onChange={(e) => setForm({ ...form, responsible_lawyer: e.target.value })}
-                      />
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="obs">Observações</Label>
-                    <Textarea
-                      id="obs"
-                      value={form.notes}
-                      onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                    />
-                  </div>
-                </div>
-                <DialogFooter>
+                  }
+                }}
+              >
+                <DialogTrigger asChild>
                   <Button
-                    onClick={() => (editingId ? update.mutate() : create.mutate())}
-                    disabled={create.isPending || update.isPending || !form.client_id}
+                    onClick={() => {
+                      setEditingId(null);
+                      setForm(EMPTY);
+                    }}
                   >
-                    {create.isPending || update.isPending ? "Salvando…" : "Salvar"}
+                    Novo processo
                   </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+                </DialogTrigger>
+                <DialogContent className="max-h-[85vh] overflow-y-auto">
+                  <DialogHeader>
+                    <DialogTitle>{editingId ? "Editar processo" : "Novo processo"}</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <Label>Cliente</Label>
+                      <Select
+                        value={form.client_id}
+                        onValueChange={(v) => setForm({ ...form, client_id: v })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Selecione o cliente" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(data?.clients ?? []).map((c) => (
+                            <SelectItem key={c.id} value={c.id}>
+                              {c.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label htmlFor="num">Nº do processo</Label>
+                        <Input
+                          id="num"
+                          value={form.case_number}
+                          onChange={(e) => setForm({ ...form, case_number: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="rec">Reclamado / parte contrária</Label>
+                        <Input
+                          id="rec"
+                          value={form.opposing_party}
+                          onChange={(e) => setForm({ ...form, opposing_party: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="court">Tribunal / vara</Label>
+                        <Input
+                          id="court"
+                          value={form.court}
+                          onChange={(e) => setForm({ ...form, court: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="area">Área do direito</Label>
+                        <Input
+                          id="area"
+                          value={form.practice_area}
+                          onChange={(e) => setForm({ ...form, practice_area: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="acao">Tipo de ação</Label>
+                        <Input
+                          id="acao"
+                          value={form.action_type}
+                          onChange={(e) => setForm({ ...form, action_type: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="adv">Advogado responsável</Label>
+                        <Input
+                          id="adv"
+                          value={form.responsible_lawyer}
+                          onChange={(e) => setForm({ ...form, responsible_lawyer: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="obs">Observações</Label>
+                      <Textarea
+                        id="obs"
+                        value={form.notes}
+                        onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      onClick={() => (editingId ? update.mutate() : create.mutate())}
+                      disabled={create.isPending || update.isPending || !form.client_id}
+                    >
+                      {create.isPending || update.isPending ? "Salvando…" : "Salvar"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
           )
         }
       />

@@ -14,6 +14,50 @@ export type Database = {
   }
   public: {
     Tables: {
+      advbox_integracao: {
+        Row: {
+          ativo: boolean
+          organization_id: string
+          token: string
+          token_dica: string | null
+          ultima_sincronizacao: string | null
+          ultimo_resultado: string | null
+          updated_at: string
+          updated_by: string | null
+          updated_by_email: string | null
+        }
+        Insert: {
+          ativo?: boolean
+          organization_id: string
+          token: string
+          token_dica?: string | null
+          ultima_sincronizacao?: string | null
+          ultimo_resultado?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          updated_by_email?: string | null
+        }
+        Update: {
+          ativo?: boolean
+          organization_id?: string
+          token?: string
+          token_dica?: string | null
+          ultima_sincronizacao?: string | null
+          ultimo_resultado?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          updated_by_email?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "advbox_integracao_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: true
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       audit_logs: {
         Row: {
           action: string
@@ -166,6 +210,7 @@ export type Database = {
       }
       cases: {
         Row: {
+          advbox_id: number | null
           action_group: string | null
           action_type: string | null
           archived_date: string | null
@@ -205,6 +250,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          advbox_id?: number | null
           action_group?: string | null
           action_type?: string | null
           archived_date?: string | null
@@ -244,6 +290,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          advbox_id?: number | null
           action_group?: string | null
           action_type?: string | null
           archived_date?: string | null
@@ -552,6 +599,7 @@ export type Database = {
       }
       clients: {
         Row: {
+          advbox_id: number | null
           address: string | null
           birth_date: string | null
           cid: string | null
@@ -584,6 +632,7 @@ export type Database = {
           zip_code: string | null
         }
         Insert: {
+          advbox_id?: number | null
           address?: string | null
           birth_date?: string | null
           cid?: string | null
@@ -616,6 +665,7 @@ export type Database = {
           zip_code?: string | null
         }
         Update: {
+          advbox_id?: number | null
           address?: string | null
           birth_date?: string | null
           cid?: string | null

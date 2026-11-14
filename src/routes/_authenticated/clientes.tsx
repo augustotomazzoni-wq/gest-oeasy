@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PageHeader } from "@/components/layout/AppLayout";
+import { BotaoAdvbox } from "@/components/BotaoAdvbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -69,7 +70,11 @@ const txt =
 const CLIENT_FIELDS: FilterField<ClientRow>[] = [
   { key: "name", label: "Nome", get: (c) => c.name },
   { key: "tax_id", label: "CPF / CNPJ", get: txt("tax_id") },
-  { key: "payer_names", label: "Quem paga (pagadores)", get: (c) => (c.payer_names ?? []).join(" ") },
+  {
+    key: "payer_names",
+    label: "Quem paga (pagadores)",
+    get: (c) => (c.payer_names ?? []).join(" "),
+  },
   { key: "rg", label: "RG", get: txt("rg") },
   { key: "phone", label: "Celular", get: txt("phone") },
   { key: "phone_secondary", label: "Telefone fixo", get: txt("phone_secondary") },
@@ -417,6 +422,8 @@ function ClientesPage() {
                   Exportar pagadores
                 </Button>
               )}
+              {/* Nada vem da Advbox sozinho: só quando este botão é apertado. */}
+              <BotaoAdvbox tipo="clientes" recarregar={["clientes", "processos"]} />
               <Dialog
                 open={open}
                 onOpenChange={(v) => {

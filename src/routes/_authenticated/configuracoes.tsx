@@ -32,7 +32,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { AdvboxPanel } from "@/components/AdvboxPanel";
 import { BackupPanel } from "@/components/BackupPanel";
+import { DashboardPrefsPanel } from "@/components/DashboardPrefsPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, maskAccount, todayISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
@@ -245,7 +247,7 @@ function ConfiguracoesPage() {
     <>
       <PageHeader
         title="Configurações"
-        description="Contas bancárias e categorias usadas nos lançamentos financeiros."
+        description="Contas bancárias, categorias e o que aparece no seu dashboard."
       />
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -527,6 +529,16 @@ function ConfiguracoesPage() {
           </table>
         </div>
       </div>
+
+      <div className="mt-4">
+        <DashboardPrefsPanel />
+      </div>
+
+      {isAdmin && (
+        <div className="mt-4">
+          <AdvboxPanel />
+        </div>
+      )}
 
       {isAdmin && <BackupPanel />}
 
