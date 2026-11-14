@@ -25,6 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ClienteLink } from "@/components/ClienteDetalhe";
+import { ExtratoCliente } from "@/components/ExtratoCliente";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, TRANSFER_STATUS_LABEL } from "@/lib/format";
 import { dropUndefined } from "@/lib/utils";
@@ -70,7 +71,9 @@ function RepassesPage() {
   // Editar repasse é permissão à parte: nasce só para o Administrador e pode
   // ser liberada por perfil na tela Usuários e Perfis de Acesso.
   const canEdit = can("repasses", "edit");
-  const [editTarget, setEditTarget] = useState<{ id: string; name: string } | null>(null);
+  const [editTarget, setEditTarget] = useState<
+    { id: string; name: string; status: string } | null
+  >(null);
   const [editForm, setEditForm] = useState({
     amount: "",
     scheduled_for: todayISO(),
@@ -88,6 +91,8 @@ function RepassesPage() {
   );
   const [payBank, setPayBank] = useState("");
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
+  // Extrato para mandar à cliente.
+  const [extrato, setExtrato] = useState<{ id: string; name: string } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const { data, isLoading } = useQuery({
@@ -511,7 +516,11 @@ function RepassesPage() {
                           setEditTarget({
                             id: t.id,
                             name: (t.clients as { name: string } | null)?.name ?? "cliente",
+                            status: t.status,
                           });
+                          // O motivo do estorno começa em branco a cada
+                          // abertura, para não reaproveitar o da vez anterior.
+                          setCancelReason("");
                           setEditForm({
                             amount: String(num(t.amount)),
                             scheduled_for: t.scheduled_for ?? todayISO(),
@@ -524,22 +533,6 @@ function RepassesPage() {
                         }}
                       >
                         Editar
-                      </Button>
-                    )}
-                    {canCancel && t.status !== "cancelado" && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-destructive"
-                        onClick={() => {
-                          setCancelTarget({
-                            id: t.id,
-                            name: (t.clients as { name: string } | null)?.name ?? "cliente",
-                          });
-                          setCancelReason("");
-                        }}
-                      >
-                        Cancelar
                       </Button>
                     )}
                   </td>
@@ -563,7 +556,8 @@ function RepassesPage() {
                 <th className="p-3">Cliente</th>
                 <th className="text-right">Total que vai receber</th>
                 <th className="text-right">Já repassado</th>
-                <th className="p-3 text-right">Falta receber</th>
+                <th className="text-right">Falta receber</th>
+                <th className="p-3" />
               </tr>
             </thead>
             <tbody>
@@ -574,14 +568,21 @@ function RepassesPage() {
                   </td>
                   <td className="num text-right">{money(b.received_client)}</td>
                   <td className="num text-right text-muted-foreground">{money(b.transferred)}</td>
-                  <td className="num p-3 text-right font-medium">
-                    {money(b.pending_transfer)}
+                  <td className="num text-right font-medium">{money(b.pending_transfer)}</td>
+                  <td className="p-3 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setExtrato({ id: b.client_id, name: b.name })}
+                    >
+                      Detalhes
+                    </Button>
                   </td>
                 </tr>
               ))}
               {devedores.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="p-6 text-center text-muted-foreground">
+                  <td colSpan={5} className="p-6 text-center text-muted-foreground">
                     Nenhum repasse pendente — todas as clientes estão em dia.
                   </td>
                 </tr>
@@ -718,9 +719,45 @@ function RepassesPage() {
               />
             </div>
           </div>
+          {/* O estorno mora aqui dentro: quem percebe o erro vai ao repasse
+              para corrigir, e antes precisava fechar, achar outro botão na
+              linha e começar de novo. */}
+          {canCancel && editTarget?.status !== "cancelado" && (
+            <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+              <p className="text-sm font-medium">Estornar este repasse</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                O repasse é cancelado e o valor volta a aparecer como devido à cliente. Se já
+                estava pago, sai também do fluxo de caixa.
+              </p>
+              <div className="mt-2 space-y-2">
+                <Label htmlFor="emotivo" className="text-xs">
+                  Motivo
+                </Label>
+                <Textarea
+                  id="emotivo"
+                  rows={2}
+                  placeholder="Por que está sendo estornado"
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                />
+                <Button
+                  variant="outline"
+                  className="border-destructive/40 text-destructive"
+                  disabled={cancelTransfer.isPending || !cancelReason.trim()}
+                  onClick={() => {
+                    if (!editTarget) return;
+                    setCancelTarget({ id: editTarget.id, name: editTarget.name });
+                  }}
+                >
+                  {cancelTransfer.isPending ? "Estornando…" : "Estornar repasse"}
+                </Button>
+              </div>
+            </div>
+          )}
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTarget(null)}>
-              Cancelar
+              Fechar
             </Button>
             <Button onClick={() => updateTransfer.mutate()} disabled={updateTransfer.isPending}>
               {updateTransfer.isPending ? "Salvando…" : "Salvar"}
@@ -728,6 +765,12 @@ function RepassesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ExtratoCliente
+        clientId={extrato?.id ?? null}
+        nome={extrato?.name ?? ""}
+        onClose={() => setExtrato(null)}
+      />
 
       <Dialog open={!!cancelTarget} onOpenChange={(v) => !v && setCancelTarget(null)}>
         <DialogContent>
