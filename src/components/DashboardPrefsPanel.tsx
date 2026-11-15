@@ -13,7 +13,7 @@ import { BLOCOS_DASHBOARD, GRUPOS, useDashboardPrefs } from "@/lib/dashboard-pre
  */
 export function DashboardPrefsPanel() {
   const { profile } = useAuth();
-  const { ocultos, alternar, mostrar, mostrarTudo } = useDashboardPrefs(profile?.id);
+  const { escondidos, alternar, mostrar, mostrarTudo } = useDashboardPrefs(profile?.id);
 
   return (
     <div className="panel">
@@ -24,7 +24,7 @@ export function DashboardPrefsPanel() {
             Desmarque o que você não usa. Vale só para o seu acesso, neste computador.
           </p>
         </div>
-        {ocultos.length > 0 && (
+        {escondidos > 0 && (
           <Button size="sm" variant="outline" onClick={mostrarTudo}>
             Mostrar tudo
           </Button>
@@ -66,9 +66,9 @@ export function DashboardPrefsPanel() {
         })}
 
         <p className="text-xs text-muted-foreground">
-          {ocultos.length === 0
+          {escondidos === 0
             ? "Tudo visível."
-            : `${ocultos.length} bloco(s) escondido(s) no seu dashboard.`}
+            : `${escondidos} bloco(s) escondido(s) no seu dashboard.`}
         </p>
       </div>
     </div>

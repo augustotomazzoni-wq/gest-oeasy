@@ -1,8 +1,8 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { PageHeader } from "@/components/layout/AppLayout";
+import { PageHeader, SectionHeader } from "@/components/layout/AppLayout";
 import { Tag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +35,9 @@ import {
 import { AdvboxPanel } from "@/components/AdvboxPanel";
 import { BackupPanel } from "@/components/BackupPanel";
 import { DashboardPrefsPanel } from "@/components/DashboardPrefsPanel";
+import { UsuariosPanel } from "@/components/config/UsuariosPanel";
+import { ImportarPanel } from "@/components/config/ImportarPanel";
+import { AuditoriaPanel } from "@/components/config/AuditoriaPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, maskAccount, todayISO } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
@@ -42,6 +45,12 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/configuracoes")({
+  // A aba aberta fica no endereço: dá para voltar direto nela e os
+  // endereços antigos (Usuários, Importar, Auditoria) caem na aba certa.
+  validateSearch: (search: Record<string, unknown>): { aba?: string } => {
+    const aba = search["aba"];
+    return typeof aba === "string" ? { aba } : {};
+  },
   head: () => ({
     meta: [
       { title: "Configurações | Gestão Financeira do Escritório" },
@@ -72,7 +81,44 @@ const EMPTY_BANK = {
 const EMPTY_CAT = { name: "", type: "despesa" };
 
 function ConfiguracoesPage() {
-  const { profile, canWrite, can, isAdmin } = useAuth();
+  const { profile, canWrite, can, allows, isAdmin } = useAuth();
+  const { aba } = Route.useSearch();
+  const navigate = useNavigate();
+
+  // Cada aba só aparece para quem pode usá-la.
+  const grupos = [
+    {
+      grupo: "Escritório",
+      abas: [
+        { id: "contas", rotulo: "Contas e categorias", pode: true },
+        { id: "usuarios", rotulo: "Usuários e acessos", pode: allows("manage_users") },
+      ],
+    },
+    {
+      grupo: "Dados",
+      abas: [
+        { id: "importar", rotulo: "Importar planilhas", pode: can("importacao", "view") },
+        { id: "backup", rotulo: "Backup", pode: isAdmin },
+        { id: "auditoria", rotulo: "Auditoria", pode: isAdmin },
+      ],
+    },
+    {
+      grupo: "Integrações",
+      abas: [{ id: "advbox", rotulo: "Advbox", pode: isAdmin }],
+    },
+    {
+      grupo: "Preferências",
+      abas: [{ id: "dashboard", rotulo: "Meu dashboard", pode: true }],
+    },
+  ]
+    .map((g) => ({ ...g, abas: g.abas.filter((a) => a.pode) }))
+    .filter((g) => g.abas.length > 0);
+
+  const permitidas = grupos.flatMap((g) => g.abas.map((a) => a.id));
+  // Aba que não existe ou que a pessoa não pode ver cai na primeira.
+  const abaAtual = aba && permitidas.includes(aba) ? aba : "contas";
+  const irPara = (id: string) =>
+    void navigate({ to: "/configuracoes", search: { aba: id }, replace: true });
   // Excluir apaga de vez; desativar só tira das listas e preserva o histórico.
   // Por isso excluir é permissão à parte, ligada só para o Administrador.
   const canDeleteBank = can("contas", "delete");
@@ -247,300 +293,347 @@ function ConfiguracoesPage() {
     <>
       <PageHeader
         title="Configurações"
-        description="Contas bancárias, categorias e o que aparece no seu dashboard."
+        description="Contas, usuários, importação, integrações e preferências do escritório."
       />
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div className="panel">
-          <div className="flex items-center justify-between border-b border-border p-3">
-            <h2 className="font-display text-sm font-semibold">Contas bancárias</h2>
-            {canWrite && (
-              <Dialog
-                open={bankOpen}
-                onOpenChange={(v) => {
-                  setBankOpen(v);
-                  if (!v) {
-                    setEditingBankId(null);
-                    setBank(EMPTY_BANK);
-                  }
-                }}
-              >
-                <DialogTrigger asChild>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setEditingBankId(null);
-                      setBank(EMPTY_BANK);
-                    }}
-                  >
-                    Nova conta
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>
-                      {editingBankId ? "Editar conta bancária" : "Nova conta bancária"}
-                    </DialogTitle>
-                  </DialogHeader>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="bn">Nome de exibição</Label>
-                      <Input
-                        id="bn"
-                        value={bank.name}
-                        onChange={(e) => setBank({ ...bank, name: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="bb">Banco</Label>
-                      <Input
-                        id="bb"
-                        value={bank.bank}
-                        onChange={(e) => setBank({ ...bank, bank: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="br">Agência</Label>
-                      <Input
-                        id="br"
-                        value={bank.branch}
-                        onChange={(e) => setBank({ ...bank, branch: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="ba">Conta</Label>
-                      <Input
-                        id="ba"
-                        value={bank.account}
-                        onChange={(e) => setBank({ ...bank, account: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="bi">Saldo inicial</Label>
-                      <Input
-                        id="bi"
-                        type="number"
-                        step="0.01"
-                        value={bank.initial_balance}
-                        onChange={(e) => setBank({ ...bank, initial_balance: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2 sm:col-span-2">
-                      <Label htmlFor="bd">Data do saldo inicial</Label>
-                      <Input
-                        id="bd"
-                        type="date"
-                        value={bank.initial_balance_date}
-                        onChange={(e) => setBank({ ...bank, initial_balance_date: e.target.value })}
-                      />
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button variant="outline" onClick={() => setBankOpen(false)}>
-                      Cancelar
-                    </Button>
-                    <Button onClick={() => saveBank.mutate()} disabled={saveBank.isPending}>
-                      {saveBank.isPending ? "Salvando…" : "Salvar"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            )}
-          </div>
-          <table className="w-full text-sm">
-            <tbody>
-              {(data?.banks ?? []).map((b) => (
-                <tr
-                  key={b.id}
-                  className={cn(
-                    "border-b border-border/60 last:border-0",
-                    !b.active && "opacity-50",
-                  )}
-                >
-                  <td className="p-3">
-                    <span className="font-medium">{b.name}</span>
-                    {!b.active && (
-                      <span className="ml-2 text-xs text-muted-foreground">(inativa)</span>
+      {/* As abas ficam numa coluna, agrupadas por assunto. Em tela estreita a
+          coluna vira uma lista em cima do conteúdo — nada de rolar para o lado. */}
+      <div className="grid gap-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
+        <nav aria-label="Seções de Configurações" className="space-y-4">
+          {grupos.map((g) => (
+            <div key={g.grupo}>
+              <p className="mb-1 px-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {g.grupo}
+              </p>
+              <div className="flex flex-wrap gap-1 lg:flex-col">
+                {g.abas.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => irPara(a.id)}
+                    aria-current={abaAtual === a.id ? "page" : undefined}
+                    className={cn(
+                      "rounded-md px-3 py-2 text-left text-sm transition-colors",
+                      abaAtual === a.id
+                        ? "bg-primary text-primary-foreground"
+                        : "text-foreground hover:bg-muted",
                     )}
-                    <span className="block text-xs text-muted-foreground">
-                      {b.bank ?? "—"} · ag. {b.branch ?? "—"} · cc. {maskAccount(b.account)}
-                    </span>
-                  </td>
-                  <td className="num text-right font-medium">
-                    {money(data?.balances.get(b.id) ?? b.initial_balance)}
-                  </td>
-                  {canWrite && (
-                    <td className="p-3 text-right whitespace-nowrap">
-                      <Button size="sm" variant="ghost" onClick={() => openEditBank(b)}>
-                        Editar
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => toggleBankActive.mutate({ id: b.id, active: !b.active })}
-                      >
-                        {b.active ? "Desativar" : "Reativar"}
-                      </Button>
-                      {canDeleteBank && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive"
-                          onClick={() => setDeleteBank({ id: b.id, name: b.name })}
-                        >
-                          Excluir
-                        </Button>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-              {(data?.banks.length ?? 0) === 0 && (
-                <tr>
-                  <td className="p-6 text-center text-muted-foreground">
-                    Nenhuma conta cadastrada.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="panel">
-          <div className="flex items-center justify-between border-b border-border p-3">
-            <h2 className="font-display text-sm font-semibold">Categorias</h2>
-            {canWrite && (
-              <Dialog
-                open={catOpen}
-                onOpenChange={(v) => {
-                  setCatOpen(v);
-                  if (!v) {
-                    setEditingCatId(null);
-                    setCat(EMPTY_CAT);
-                  }
-                }}
-              >
-                <DialogTrigger asChild>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setEditingCatId(null);
-                      setCat(EMPTY_CAT);
-                    }}
                   >
-                    Nova categoria
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>
-                      {editingCatId ? "Editar categoria" : "Nova categoria"}
-                    </DialogTitle>
-                  </DialogHeader>
-                  <div className="grid gap-3">
-                    <div className="space-y-2">
-                      <Label htmlFor="cn">Nome</Label>
-                      <Input
-                        id="cn"
-                        value={cat.name}
-                        onChange={(e) => setCat({ ...cat, name: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Tipo</Label>
-                      <Select value={cat.type} onValueChange={(v) => setCat({ ...cat, type: v })}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="receita">Receita</SelectItem>
-                          <SelectItem value="despesa">Despesa</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button variant="outline" onClick={() => setCatOpen(false)}>
-                      Cancelar
-                    </Button>
-                    <Button onClick={() => saveCat.mutate()} disabled={saveCat.isPending}>
-                      {saveCat.isPending ? "Salvando…" : "Salvar"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            )}
-          </div>
-          <table className="w-full text-sm">
-            <tbody>
-              {(data?.categories ?? []).map((c) => (
-                <tr
-                  key={c.id}
-                  className={cn(
-                    "border-b border-border/60 last:border-0",
-                    !c.active && "opacity-50",
-                  )}
-                >
-                  <td className="p-3">
-                    {c.name}
-                    {!c.active && (
-                      <span className="ml-2 text-xs text-muted-foreground">(inativa)</span>
-                    )}
-                  </td>
-                  <td className="text-right">
-                    <Tag tone={c.type === "receita" ? "success" : "danger"}>
-                      {c.type === "receita" ? "Receita" : "Despesa"}
-                    </Tag>
-                  </td>
-                  {canWrite && (
-                    <td className="p-3 text-right whitespace-nowrap">
-                      <Button size="sm" variant="ghost" onClick={() => openEditCat(c)}>
-                        Editar
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => toggleCatActive.mutate({ id: c.id, active: !c.active })}
+                    {a.rotulo}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        <section className="min-w-0">
+          {abaAtual === "contas" && (
+            <>
+              <SectionHeader
+                title="Contas e categorias"
+                description="As contas bancárias do escritório e as categorias usadas nos lançamentos."
+              />
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="panel">
+                  <div className="flex items-center justify-between border-b border-border p-3">
+                    <h2 className="font-display text-sm font-semibold">Contas bancárias</h2>
+                    {canWrite && (
+                      <Dialog
+                        open={bankOpen}
+                        onOpenChange={(v) => {
+                          setBankOpen(v);
+                          if (!v) {
+                            setEditingBankId(null);
+                            setBank(EMPTY_BANK);
+                          }
+                        }}
                       >
-                        {c.active ? "Desativar" : "Reativar"}
-                      </Button>
-                      {canDeleteCat && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive"
-                          onClick={() => setDeleteCat({ id: c.id, name: c.name })}
+                        <DialogTrigger asChild>
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              setEditingBankId(null);
+                              setBank(EMPTY_BANK);
+                            }}
+                          >
+                            Nova conta
+                          </Button>
+                        </DialogTrigger>
+                        <DialogContent>
+                          <DialogHeader>
+                            <DialogTitle>
+                              {editingBankId ? "Editar conta bancária" : "Nova conta bancária"}
+                            </DialogTitle>
+                          </DialogHeader>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="space-y-2 sm:col-span-2">
+                              <Label htmlFor="bn">Nome de exibição</Label>
+                              <Input
+                                id="bn"
+                                value={bank.name}
+                                onChange={(e) => setBank({ ...bank, name: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="bb">Banco</Label>
+                              <Input
+                                id="bb"
+                                value={bank.bank}
+                                onChange={(e) => setBank({ ...bank, bank: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="br">Agência</Label>
+                              <Input
+                                id="br"
+                                value={bank.branch}
+                                onChange={(e) => setBank({ ...bank, branch: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="ba">Conta</Label>
+                              <Input
+                                id="ba"
+                                value={bank.account}
+                                onChange={(e) => setBank({ ...bank, account: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="bi">Saldo inicial</Label>
+                              <Input
+                                id="bi"
+                                type="number"
+                                step="0.01"
+                                value={bank.initial_balance}
+                                onChange={(e) =>
+                                  setBank({ ...bank, initial_balance: e.target.value })
+                                }
+                              />
+                            </div>
+                            <div className="space-y-2 sm:col-span-2">
+                              <Label htmlFor="bd">Data do saldo inicial</Label>
+                              <Input
+                                id="bd"
+                                type="date"
+                                value={bank.initial_balance_date}
+                                onChange={(e) =>
+                                  setBank({ ...bank, initial_balance_date: e.target.value })
+                                }
+                              />
+                            </div>
+                          </div>
+                          <DialogFooter>
+                            <Button variant="outline" onClick={() => setBankOpen(false)}>
+                              Cancelar
+                            </Button>
+                            <Button onClick={() => saveBank.mutate()} disabled={saveBank.isPending}>
+                              {saveBank.isPending ? "Salvando…" : "Salvar"}
+                            </Button>
+                          </DialogFooter>
+                        </DialogContent>
+                      </Dialog>
+                    )}
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {(data?.banks ?? []).map((b) => (
+                        <tr
+                          key={b.id}
+                          className={cn(
+                            "border-b border-border/60 last:border-0",
+                            !b.active && "opacity-50",
+                          )}
                         >
-                          Excluir
-                        </Button>
+                          <td className="p-3">
+                            <span className="font-medium">{b.name}</span>
+                            {!b.active && (
+                              <span className="ml-2 text-xs text-muted-foreground">(inativa)</span>
+                            )}
+                            <span className="block text-xs text-muted-foreground">
+                              {b.bank ?? "—"} · ag. {b.branch ?? "—"} · cc. {maskAccount(b.account)}
+                            </span>
+                          </td>
+                          <td className="num text-right font-medium">
+                            {money(data?.balances.get(b.id) ?? b.initial_balance)}
+                          </td>
+                          {canWrite && (
+                            <td className="p-3 text-right whitespace-nowrap">
+                              <Button size="sm" variant="ghost" onClick={() => openEditBank(b)}>
+                                Editar
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() =>
+                                  toggleBankActive.mutate({ id: b.id, active: !b.active })
+                                }
+                              >
+                                {b.active ? "Desativar" : "Reativar"}
+                              </Button>
+                              {canDeleteBank && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="text-destructive"
+                                  onClick={() => setDeleteBank({ id: b.id, name: b.name })}
+                                >
+                                  Excluir
+                                </Button>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                      {(data?.banks.length ?? 0) === 0 && (
+                        <tr>
+                          <td className="p-6 text-center text-muted-foreground">
+                            Nenhuma conta cadastrada.
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-              {(data?.categories.length ?? 0) === 0 && (
-                <tr>
-                  <td className="p-6 text-center text-muted-foreground">
-                    Nenhuma categoria cadastrada.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="panel">
+                  <div className="flex items-center justify-between border-b border-border p-3">
+                    <h2 className="font-display text-sm font-semibold">Categorias</h2>
+                    {canWrite && (
+                      <Dialog
+                        open={catOpen}
+                        onOpenChange={(v) => {
+                          setCatOpen(v);
+                          if (!v) {
+                            setEditingCatId(null);
+                            setCat(EMPTY_CAT);
+                          }
+                        }}
+                      >
+                        <DialogTrigger asChild>
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              setEditingCatId(null);
+                              setCat(EMPTY_CAT);
+                            }}
+                          >
+                            Nova categoria
+                          </Button>
+                        </DialogTrigger>
+                        <DialogContent>
+                          <DialogHeader>
+                            <DialogTitle>
+                              {editingCatId ? "Editar categoria" : "Nova categoria"}
+                            </DialogTitle>
+                          </DialogHeader>
+                          <div className="grid gap-3">
+                            <div className="space-y-2">
+                              <Label htmlFor="cn">Nome</Label>
+                              <Input
+                                id="cn"
+                                value={cat.name}
+                                onChange={(e) => setCat({ ...cat, name: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label>Tipo</Label>
+                              <Select
+                                value={cat.type}
+                                onValueChange={(v) => setCat({ ...cat, type: v })}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="receita">Receita</SelectItem>
+                                  <SelectItem value="despesa">Despesa</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+                          <DialogFooter>
+                            <Button variant="outline" onClick={() => setCatOpen(false)}>
+                              Cancelar
+                            </Button>
+                            <Button onClick={() => saveCat.mutate()} disabled={saveCat.isPending}>
+                              {saveCat.isPending ? "Salvando…" : "Salvar"}
+                            </Button>
+                          </DialogFooter>
+                        </DialogContent>
+                      </Dialog>
+                    )}
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {(data?.categories ?? []).map((c) => (
+                        <tr
+                          key={c.id}
+                          className={cn(
+                            "border-b border-border/60 last:border-0",
+                            !c.active && "opacity-50",
+                          )}
+                        >
+                          <td className="p-3">
+                            {c.name}
+                            {!c.active && (
+                              <span className="ml-2 text-xs text-muted-foreground">(inativa)</span>
+                            )}
+                          </td>
+                          <td className="text-right">
+                            <Tag tone={c.type === "receita" ? "success" : "danger"}>
+                              {c.type === "receita" ? "Receita" : "Despesa"}
+                            </Tag>
+                          </td>
+                          {canWrite && (
+                            <td className="p-3 text-right whitespace-nowrap">
+                              <Button size="sm" variant="ghost" onClick={() => openEditCat(c)}>
+                                Editar
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() =>
+                                  toggleCatActive.mutate({ id: c.id, active: !c.active })
+                                }
+                              >
+                                {c.active ? "Desativar" : "Reativar"}
+                              </Button>
+                              {canDeleteCat && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="text-destructive"
+                                  onClick={() => setDeleteCat({ id: c.id, name: c.name })}
+                                >
+                                  Excluir
+                                </Button>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                      {(data?.categories.length ?? 0) === 0 && (
+                        <tr>
+                          <td className="p-6 text-center text-muted-foreground">
+                            Nenhuma categoria cadastrada.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+          {abaAtual === "usuarios" && <UsuariosPanel />}
+          {abaAtual === "importar" && <ImportarPanel />}
+          {abaAtual === "backup" && <BackupPanel />}
+          {abaAtual === "auditoria" && <AuditoriaPanel />}
+          {abaAtual === "advbox" && <AdvboxPanel />}
+          {abaAtual === "dashboard" && <DashboardPrefsPanel />}
+        </section>
       </div>
-
-      <div className="mt-4">
-        <DashboardPrefsPanel />
-      </div>
-
-      {isAdmin && (
-        <div className="mt-4">
-          <AdvboxPanel />
-        </div>
-      )}
-
-      {isAdmin && <BackupPanel />}
 
       <AlertDialog open={!!deleteBank} onOpenChange={(v) => !v && setDeleteBank(null)}>
         <AlertDialogContent>

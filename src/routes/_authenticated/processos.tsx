@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { BotaoAdvbox } from "@/components/BotaoAdvbox";
+import { FiltroCliente } from "@/components/FiltroCliente";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -134,6 +135,7 @@ function ProcessosPage() {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [field, setField] = useState<string>(ALL_FIELDS);
+  const [clienteFiltro, setClienteFiltro] = useState("");
   const [form, setForm] = useState(EMPTY);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -260,7 +262,21 @@ function ProcessosPage() {
   }
 
   const matches = makeFieldMatcher(CASE_FIELDS, field, search);
-  const rows = ((data?.cases ?? []) as unknown as CaseRow[]).filter(matches);
+  const todosOsProcessos = (data?.cases ?? []) as unknown as CaseRow[];
+  // Só aparecem na lista as clientes que têm processo — escolher uma sem
+  // processo daria sempre uma tela vazia.
+  const clientesComProcesso = (() => {
+    const mapa = new Map<string, { id: string; nome: string; quantos: number }>();
+    for (const c of todosOsProcessos) {
+      const atual = mapa.get(c.client_id);
+      if (atual) atual.quantos += 1;
+      else mapa.set(c.client_id, { id: c.client_id, nome: c.clients?.name ?? "—", quantos: 1 });
+    }
+    return [...mapa.values()].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  })();
+  const rows = todosOsProcessos
+    .filter((c) => !clienteFiltro || c.client_id === clienteFiltro)
+    .filter(matches);
 
   return (
     <>
@@ -389,17 +405,24 @@ function ProcessosPage() {
         }
       />
 
-      <FieldFilter
-        fields={CASE_FIELDS}
-        fieldKey={field}
-        onFieldChange={setField}
-        term={search}
-        onTermChange={setSearch}
-        placeholder="Buscar em qualquer campo do processo…"
-      />
+      <div className="flex flex-wrap items-start gap-2">
+        <FiltroCliente
+          opcoes={clientesComProcesso}
+          valor={clienteFiltro}
+          onChange={setClienteFiltro}
+        />
+        <FieldFilter
+          fields={CASE_FIELDS}
+          fieldKey={field}
+          onFieldChange={setField}
+          term={search}
+          onTermChange={setSearch}
+          placeholder="Buscar em qualquer campo do processo…"
+        />
+      </div>
 
       <p className="mb-2 text-xs text-muted-foreground">
-        {rows.length} processo(s) {search ? "encontrado(s)" : "cadastrado(s)"}
+        {rows.length} processo(s) {search || clienteFiltro ? "encontrado(s)" : "cadastrado(s)"}
       </p>
 
       <div className="panel overflow-x-auto">

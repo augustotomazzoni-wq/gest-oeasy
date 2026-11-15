@@ -10,11 +10,8 @@ import {
   Wallet,
   Landmark,
   Settings,
-  ShieldCheck,
   LogOut,
   Menu,
-  Upload,
-  History,
   X,
 } from "lucide-react";
 import { useAuth, ROLE_LABEL, type AppRole } from "@/hooks/useAuth";
@@ -34,27 +31,17 @@ export const NAV = [
   { to: "/repasses", label: "Repasses a Clientes", icon: Send, module: "repasses" },
   { to: "/caixa", label: "Fluxo de Caixa", icon: Wallet, module: "caixa" },
   { to: "/emprestimos", label: "Empréstimos", icon: Landmark, module: "caixa" },
-  { to: "/importar", label: "Importar Planilha", icon: Upload, module: "importacao" },
   { to: "/configuracoes", label: "Configurações", icon: Settings, module: "contas" },
 ] as const;
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { profile, roles, allows, can, isAdmin, signOut } = useAuth();
+  const { profile, roles, can, signOut } = useAuth();
   const [open, setOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   const visible = NAV.filter((item) => can(item.module, "view"));
-  const items = [
-    ...visible,
-    ...(allows("manage_users")
-      ? [{ to: "/usuarios", label: "Usuários e Acessos", icon: ShieldCheck, module: "usuarios" }]
-      : []),
-    // O registro de quem fez o quê é só do Administrador — é o mesmo corte
-    // que o banco aplica na leitura.
-    ...(isAdmin
-      ? [{ to: "/auditoria", label: "Auditoria", icon: History, module: "auditoria" }]
-      : []),
-  ];
+  // Usuários, importação e auditoria agora são abas de Configurações.
+  const items = visible;
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -132,6 +119,30 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </header>
         <main className="min-w-0 flex-1 p-4 lg:p-8">{children}</main>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Cabeçalho de uma seção dentro de uma página (as abas de Configurações).
+ * Mesma forma do PageHeader, um degrau menor, para não parecer outra tela.
+ */
+export function SectionHeader({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h2 className="font-display text-lg font-semibold">{title}</h2>
+        {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
+      </div>
+      {action}
     </div>
   );
 }

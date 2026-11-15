@@ -11,6 +11,13 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { MoreHorizontal } from "lucide-react";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -311,23 +318,6 @@ function CaixaPage() {
       else t.aReceber += num(r.amount);
     }
     return t;
-  }, [data]);
-
-  // Para onde foi o dinheiro: despesas pagas no período, por categoria.
-  // Empréstimo e transferência ficam de fora pelo mesmo motivo que ficam
-  // fora do resultado — não são custo de operar.
-  const porCategoria = useMemo(() => {
-    const mapa = new Map<string, number>();
-    for (const r of data?.transactions ?? []) {
-      if (r.status !== "pago" || r.type !== "saida" || r.is_financing || isTransfer(r)) continue;
-      const nome = r.categories?.name ?? SEM_CATEGORIA;
-      mapa.set(nome, (mapa.get(nome) ?? 0) + num(r.amount));
-    }
-    const lista = [...mapa.entries()]
-      .map(([nome, valor]) => ({ nome, valor }))
-      .sort((a, b) => b.valor - a.valor);
-    const total = lista.reduce((s, c) => s + c.valor, 0);
-    return { lista, total };
   }, [data]);
 
   const totals = useMemo(() => {
@@ -800,7 +790,7 @@ function CaixaPage() {
         )}
       </div>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="panel p-4">
           <p className="text-xs text-muted-foreground uppercase">Entradas na conta</p>
           <p className="num mt-1 text-xl font-semibold text-success">{money(totals.in)}</p>
@@ -859,250 +849,188 @@ function CaixaPage() {
         placeholder="Buscar por descrição, cliente, categoria, conta…"
       />
 
-      <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
-        <div className="panel overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
-                <th className="p-3">Data</th>
-                <th>Descrição</th>
-                <th>Tipo</th>
-                <th>Situação</th>
-                <th>Forma</th>
-                <th>Conta</th>
-                <th className="text-right">Valor</th>
-                {canLaunch && <th className="p-3" />}
+      {/* A tabela ocupa a largura toda e cabe sem rolar para o lado: tipo e
+          situação dividem a mesma coluna, conta e forma também, e as ações
+          raras ficam no menu "⋯". O saldo por conta e as despesas por
+          categoria saíram daqui — o saldo está no dashboard e em
+          Configurações, e as despesas por categoria viraram um bloco do
+          dashboard. */}
+      <div className="panel">
+        <table className="w-full table-fixed text-sm">
+          <thead>
+            <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase">
+              <th className="w-24 p-3">Data</th>
+              <th className="py-3 pr-3">Descrição</th>
+              <th className="w-36 py-3 pr-3">Tipo / situação</th>
+              <th className="hidden w-40 py-3 pr-3 xl:table-cell">Conta / forma</th>
+              <th className="w-32 py-3 pr-3 text-right">Valor</th>
+              {canLaunch && <th className="w-28 p-3" />}
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading && (
+              <tr>
+                <td colSpan={6} className="p-6 text-center text-muted-foreground">
+                  Carregando…
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {isLoading && (
-                <tr>
-                  <td colSpan={8} className="p-6 text-center text-muted-foreground">
-                    Carregando…
-                  </td>
-                </tr>
-              )}
-              {!isLoading && rows.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="p-6 text-center text-muted-foreground">
-                    {search
-                      ? "Nenhum lançamento bate com a busca."
-                      : view === "vencidas"
-                        ? "Nenhuma conta vencida em aberto."
-                        : "Nenhuma movimentação no período."}
-                  </td>
-                </tr>
-              )}
-              {rows.map((t) => (
-                <tr key={t.id} className="border-b border-border/60 last:border-0">
-                  <td className="p-3 whitespace-nowrap">
+            )}
+            {!isLoading && rows.length === 0 && (
+              <tr>
+                <td colSpan={6} className="p-6 text-center text-muted-foreground">
+                  {search
+                    ? "Nenhum lançamento bate com a busca."
+                    : view === "vencidas"
+                      ? "Nenhuma conta vencida em aberto."
+                      : "Nenhuma movimentação no período."}
+                </td>
+              </tr>
+            )}
+            {rows.map((t) => {
+              const ehManual = !t.source_type;
+              const podeEditar = canEdit && (ehManual || isTransfer(t));
+              const podeApagar = canDelete && (ehManual || isTransfer(t));
+              const temSerie = !!t.recurrence_group_id && t.status !== "pago";
+              const temMenu = podeEditar || podeApagar || temSerie;
+              const vencida = t.status !== "pago" && !!t.due_date && t.due_date < today;
+              return (
+                <tr key={t.id} className="border-b border-border/60 align-top last:border-0">
+                  <td className="num p-3">
                     {dateBR(refDate(t))}
                     {t.status !== "pago" && (
-                      <span className="block text-xs text-muted-foreground">vencimento</span>
+                      <span
+                        className={`block text-xs ${vencida ? "font-medium text-destructive" : "text-muted-foreground"}`}
+                      >
+                        {vencida ? "vencida" : "vencimento"}
+                      </span>
                     )}
                   </td>
-                  <td>
+                  <td className="py-3 pr-3 break-words">
                     <span className="font-medium">{t.description}</span>
                     {/* De quem é a parcela. Sem isto a linha mostrava o valor e
                         deixava quem lê adivinhar de qual cliente veio. */}
                     {t.clients?.name && (
                       <span className="block text-xs font-medium text-info">{t.clients.name}</span>
                     )}
-                    {t.categories?.name && (
-                      <span className="block text-xs text-muted-foreground">
-                        {t.categories.name}
-                      </span>
-                    )}
-                    {t.recurrence_total && (
-                      <span className="block text-xs text-muted-foreground">
-                        Recorrência {t.recurrence_index}/{t.recurrence_total}
-                      </span>
-                    )}
+                    <span className="block text-xs text-muted-foreground">
+                      {[
+                        t.categories?.name,
+                        t.recurrence_total
+                          ? `Recorrência ${t.recurrence_index}/${t.recurrence_total}`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                    {/* Abaixo de tela larga a coluna de conta some; a conta vem para cá. */}
+                    <span className="block text-xs text-muted-foreground xl:hidden">
+                      {t.bank_accounts?.name ?? ""}
+                    </span>
                   </td>
-                  <td>
-                    {/* A transferência tem etiqueta própria: marcada como
-                        "Receita" ou "Despesa" ela pareceria dinheiro entrando
-                        ou saindo do escritório, e não é. */}
-                    {isTransfer(t) ? (
-                      <Tag tone="info">
-                        {t.source_type === TRANSFER_OUT ? "Transf. enviada" : "Transf. recebida"}
+                  <td className="py-3 pr-3">
+                    <span className="flex flex-col items-start gap-1">
+                      {/* A transferência tem etiqueta própria: marcada como
+                          "Receita" ou "Despesa" ela pareceria dinheiro entrando
+                          ou saindo do escritório, e não é. */}
+                      {isTransfer(t) ? (
+                        <Tag tone="info">
+                          {t.source_type === TRANSFER_OUT ? "Transf. enviada" : "Transf. recebida"}
+                        </Tag>
+                      ) : (
+                        <Tag
+                          tone={
+                            THIRD_PARTY.has(t.type)
+                              ? "info"
+                              : t.type === "entrada"
+                                ? "success"
+                                : "danger"
+                          }
+                        >
+                          {TX_TYPE_LABEL[t.type] ?? t.type}
+                        </Tag>
+                      )}
+                      <Tag tone={t.status === "pago" ? "success" : "warning"}>
+                        {TX_STATUS_LABEL[t.status] ?? t.status}
                       </Tag>
-                    ) : (
-                      <Tag
-                        tone={
-                          THIRD_PARTY.has(t.type)
-                            ? "info"
-                            : t.type === "entrada"
-                              ? "success"
-                              : "danger"
-                        }
-                      >
-                        {TX_TYPE_LABEL[t.type] ?? t.type}
-                      </Tag>
-                    )}
+                    </span>
                   </td>
-                  <td>
-                    <Tag tone={t.status === "pago" ? "success" : "warning"}>
-                      {TX_STATUS_LABEL[t.status] ?? t.status}
-                    </Tag>
+                  <td className="hidden py-3 pr-3 break-words xl:table-cell">
+                    {t.bank_accounts?.name ?? "—"}
+                    <span className="block text-xs text-muted-foreground">
+                      {t.payment_method ? (PAYMENT_METHOD_LABEL[t.payment_method] ?? "—") : "—"}
+                    </span>
                   </td>
-                  <td className="text-xs">
-                    {t.payment_method ? (PAYMENT_METHOD_LABEL[t.payment_method] ?? "—") : "—"}
-                  </td>
-                  <td>{t.bank_accounts?.name ?? "—"}</td>
-                  <td className="num text-right">{money(t.amount)}</td>
+                  <td className="num py-3 pr-3 text-right font-medium">{money(t.amount)}</td>
                   {canLaunch && (
-                    <td className="p-3 text-right whitespace-nowrap">
-                      {t.status !== "pago" && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => {
-                            setPayTarget(t);
-                            setPayDate(today);
-                          }}
-                        >
-                          Marcar como pago
-                        </Button>
-                      )}
-                      {/* Editar e excluir só valem para lançamento manual: o que
-                          veio de um recebimento é espelho da parcela e se
-                          desfaz estornando a origem. */}
-                      {canEdit && !t.source_type && (
-                        <Button size="sm" variant="ghost" onClick={() => openEdit(t)}>
-                          Editar
-                        </Button>
-                      )}
-                      {canDelete && !t.source_type && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive"
-                          onClick={() => setDeleteTarget(t)}
-                        >
-                          Excluir
-                        </Button>
-                      )}
-                      {/* A transferência é um par: editar ou apagar leva as duas
-                          pernas juntas, senão uma conta ficaria com saldo errado.
-                          Por isso não usa os botões acima. */}
-                      {canEdit && isTransfer(t) && (
-                        <Button size="sm" variant="ghost" onClick={() => openEditTransfer(t)}>
-                          Editar transferência
-                        </Button>
-                      )}
-                      {canDelete && isTransfer(t) && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive"
-                          onClick={() => setDeleteTarget(t)}
-                        >
-                          Apagar transferência
-                        </Button>
-                      )}
-                      {t.recurrence_group_id && t.status !== "pago" && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive"
-                          disabled={removeSeries.isPending}
-                          onClick={() => removeSeries.mutate(t.recurrence_group_id!)}
-                        >
-                          Apagar série
-                        </Button>
-                      )}
+                    <td className="py-2 pr-2">
+                      <span className="flex items-center justify-end gap-1">
+                        {t.status !== "pago" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => {
+                              setPayTarget(t);
+                              setPayDate(today);
+                            }}
+                          >
+                            Pagar
+                          </Button>
+                        )}
+                        {temMenu && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 w-7 p-0"
+                                aria-label="Mais ações"
+                              >
+                                <MoreHorizontal className="size-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              {/* Editar e excluir só valem para lançamento manual:
+                                  o que veio de um recebimento é espelho da parcela
+                                  e se desfaz estornando a origem. A transferência
+                                  é um par: editar ou apagar leva as duas pernas. */}
+                              {podeEditar && (
+                                <DropdownMenuItem
+                                  onSelect={() =>
+                                    isTransfer(t) ? openEditTransfer(t) : openEdit(t)
+                                  }
+                                >
+                                  {isTransfer(t) ? "Editar transferência" : "Editar"}
+                                </DropdownMenuItem>
+                              )}
+                              {podeApagar && (
+                                <DropdownMenuItem
+                                  className="text-destructive"
+                                  onSelect={() => setDeleteTarget(t)}
+                                >
+                                  {isTransfer(t) ? "Apagar transferência" : "Excluir"}
+                                </DropdownMenuItem>
+                              )}
+                              {temSerie && (
+                                <DropdownMenuItem
+                                  className="text-destructive"
+                                  disabled={removeSeries.isPending}
+                                  onSelect={() => removeSeries.mutate(t.recurrence_group_id!)}
+                                >
+                                  Apagar série inteira
+                                </DropdownMenuItem>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </span>
                     </td>
                   )}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="space-y-4">
-          <div className="panel overflow-x-auto">
-            <div className="border-b border-border p-3">
-              <h2 className="font-display text-sm font-semibold">Saldo por conta</h2>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Só o que já foi pago — contas agendadas não mexem no saldo.
-              </p>
-            </div>
-            <table className="w-full text-sm">
-              <tbody>
-                {(data?.balances ?? []).map((b) => (
-                  <tr key={b.bank_account_id} className="border-b border-border/60 last:border-0">
-                    <td className="p-3">{b.name}</td>
-                    <td className="num p-3 text-right font-medium">{money(b.balance)}</td>
-                  </tr>
-                ))}
-                {(data?.balances.length ?? 0) === 0 && (
-                  <tr>
-                    <td className="p-6 text-center text-muted-foreground">
-                      Cadastre uma conta bancária para acompanhar os saldos.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Para onde foi o dinheiro. A categoria era lançada em toda despesa
-            e não aparecia somada em lugar nenhum. */}
-          <div className="panel">
-            <div className="border-b border-border p-3">
-              <h2 className="font-display text-sm font-semibold">Despesas por categoria</h2>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Pagas no período, sem empréstimo. Clique numa categoria para ver os lançamentos.
-              </p>
-            </div>
-            <div className="space-y-3 p-3">
-              {porCategoria.lista.length === 0 && (
-                <p className="py-3 text-center text-sm text-muted-foreground">
-                  Nenhuma despesa paga no período.
-                </p>
-              )}
-              {porCategoria.lista.map((c) => {
-                const parte = porCategoria.total > 0 ? (c.valor / porCategoria.total) * 100 : 0;
-                return (
-                  <button
-                    key={c.nome}
-                    type="button"
-                    className="block w-full text-left transition-opacity hover:opacity-80"
-                    onClick={() => {
-                      setView("pago");
-                      setKind("despesas");
-                      setField("categoria");
-                      setSearch(c.nome);
-                    }}
-                  >
-                    <span className="flex items-baseline justify-between gap-2 text-sm">
-                      <span className="truncate">{c.nome}</span>
-                      <span className="num shrink-0 font-medium">
-                        {money(c.valor)}
-                        <span className="ml-1 text-xs font-normal text-muted-foreground">
-                          {parte.toFixed(0)}%
-                        </span>
-                      </span>
-                    </span>
-                    <span className="mt-1 block h-1.5 rounded-full bg-muted">
-                      <span
-                        className="block h-1.5 rounded-full bg-primary"
-                        style={{ width: `${Math.max(parte, 1)}%` }}
-                      />
-                    </span>
-                  </button>
-                );
-              })}
-              {porCategoria.lista.length > 0 && (
-                <p className="flex justify-between border-t border-border pt-2 text-sm font-medium">
-                  <span>Total</span>
-                  <span className="num">{money(porCategoria.total)}</span>
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       {/* Mesmo formulário serve para criar e para editar. */}

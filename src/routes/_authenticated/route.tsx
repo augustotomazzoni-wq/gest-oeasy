@@ -8,7 +8,7 @@ export const Route = createFileRoute("/_authenticated")({
 });
 
 function Guard() {
-  const { loading, session, profile, can, allows, isAdmin } = useAuth();
+  const { loading, session, profile, can } = useAuth();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
@@ -16,8 +16,6 @@ function Guard() {
   // continuava abrindo se fosse digitado. Aqui a mesma regra do menu vale
   // para a rota — e o banco aplica a mesma coisa na leitura dos dados.
   const liberada = (() => {
-    if (pathname.startsWith("/usuarios")) return allows("manage_users");
-    if (pathname.startsWith("/auditoria")) return isAdmin;
     const item = NAV.find((n) => pathname.startsWith(n.to));
     return item ? can(item.module, "view") : true;
   })();

@@ -251,6 +251,47 @@ function receivableOf(row: unknown): { client_id?: string; case_id?: string } | 
  * Por isso o recebido é agrupado pela data em que o dinheiro entrou, e o a
  * receber pelo vencimento da parcela.
  */
+/**
+ * Despesas pagas num intervalo, para o bloco "Despesas por categoria".
+ * Só busca quando o bloco está ligado: é consulta de quem quer, não de todos.
+ */
+function useDespesasPorCategoria(start: string, end: string, ligado: boolean) {
+  return useQuery({
+    queryKey: ["dashboard-categorias", start, end],
+    enabled: ligado,
+    queryFn: async () => {
+      const { data, error } = await todas(
+        supabase
+          .from("financial_transactions")
+          .select("amount, is_financing, source_type, categories(name)")
+          .eq("status", "pago")
+          .eq("type", "saida")
+          .gte("paid_on", start)
+          .lte("paid_on", end)
+          .order("id"),
+      );
+      if (error) throw error;
+      const mapa = new Map<string, number>();
+      for (const t of (data ?? []) as unknown as {
+        amount: number;
+        is_financing: boolean | null;
+        source_type: string | null;
+        categories: { name: string } | null;
+      }[]) {
+        // Empréstimo e transferência não são custo de operar.
+        if (t.is_financing || t.source_type === "transfer_out" || t.source_type === "transfer_in")
+          continue;
+        const nome = t.categories?.name ?? "Sem categoria";
+        mapa.set(nome, (mapa.get(nome) ?? 0) + num(t.amount));
+      }
+      const lista = [...mapa.entries()]
+        .map(([nome, valor]) => ({ nome, valor }))
+        .sort((a, b) => b.valor - a.valor);
+      return { lista, total: lista.reduce((s, c) => s + c.valor, 0) };
+    },
+  });
+}
+
 function useHonorariosData(start: string, end: string) {
   return useQuery({
     queryKey: ["dashboard-honorarios", start, end],
@@ -308,7 +349,7 @@ function rotuloArea(valor: string): string {
 }
 
 /** Blocos que dependem dos lançamentos do Fluxo de Caixa. */
-const SO_COM_CAIXA = new Set(["periodo", "saldo", "despesas", "resultado"]);
+const SO_COM_CAIXA = new Set(["periodo", "saldo", "despesas", "resultado", "g_categorias"]);
 
 /** O escritório é de trabalhista: é a área que abre marcada. */
 const AREA_PADRAO = "trabalhista";
@@ -425,6 +466,19 @@ function Dashboard() {
   const honCustom = { start: honStart, end: honEnd };
   const honRange = periodRange(honType, honAnchor, honCustom);
   const { data: honData, isLoading: honLoading } = useHonorariosData(honRange.start, honRange.end);
+
+  // Filtro exclusivo do bloco de despesas por categoria.
+  const [catType, setCatType] = useState<PeriodType>("mes");
+  const [catAnchor, setCatAnchor] = useState(today);
+  const [catStart, setCatStart] = useState(startOfMonthISO(today));
+  const [catEnd, setCatEnd] = useState(today);
+  const catCustom = { start: catStart, end: catEnd };
+  const catRange = periodRange(catType, catAnchor, catCustom);
+  const { data: catData, isLoading: catLoading } = useDespesasPorCategoria(
+    catRange.start,
+    catRange.end,
+    mostrar("g_categorias"),
+  );
 
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">Carregando indicadores…</p>;
@@ -1361,6 +1415,66 @@ function Dashboard() {
                 ? "Carregando…"
                 : `No período: ${money(honRecebidoTotal)} recebidos e ${money(honAReceberTotal)} a receber. Só honorários e sucumbência — o dinheiro das clientes fica de fora.`}
             </p>
+          </div>
+        )}
+
+        {mostrar("g_categorias") && (
+          <div className="panel p-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h2 className="font-display text-sm font-semibold">Despesas por categoria</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Pagas em {periodLabel(catType, catAnchor, catCustom)}, sem empréstimo.
+                </p>
+              </div>
+              <PeriodFilter
+                type={catType}
+                onTypeChange={setCatType}
+                anchor={catAnchor}
+                onAnchorChange={setCatAnchor}
+                customStart={catStart}
+                customEnd={catEnd}
+                onCustomStartChange={setCatStart}
+                onCustomEndChange={setCatEnd}
+                compacto
+              />
+            </div>
+            <div className="mt-4 space-y-3">
+              {catLoading && <p className="text-sm text-muted-foreground">Carregando…</p>}
+              {!catLoading && (catData?.lista.length ?? 0) === 0 && (
+                <p className="py-3 text-center text-sm text-muted-foreground">
+                  Nenhuma despesa paga no período.
+                </p>
+              )}
+              {(catData?.lista ?? []).map((c) => {
+                const parte = catData && catData.total > 0 ? (c.valor / catData.total) * 100 : 0;
+                return (
+                  <div key={c.nome}>
+                    <span className="flex items-baseline justify-between gap-2 text-sm">
+                      <span className="truncate">{c.nome}</span>
+                      <span className="num shrink-0 font-medium">
+                        {money(c.valor)}
+                        <span className="ml-1 text-xs font-normal text-muted-foreground">
+                          {parte.toFixed(0)}%
+                        </span>
+                      </span>
+                    </span>
+                    <span className="mt-1 block h-1.5 rounded-full bg-muted">
+                      <span
+                        className="block h-1.5 rounded-full bg-primary"
+                        style={{ width: `${Math.max(parte, 1)}%` }}
+                      />
+                    </span>
+                  </div>
+                );
+              })}
+              {(catData?.lista.length ?? 0) > 0 && (
+                <p className="flex justify-between border-t border-border pt-2 text-sm font-medium">
+                  <span>Total</span>
+                  <span className="num">{money(catData?.total ?? 0)}</span>
+                </p>
+              )}
+            </div>
           </div>
         )}
 

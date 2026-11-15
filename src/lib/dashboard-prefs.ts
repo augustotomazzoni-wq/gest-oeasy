@@ -24,6 +24,11 @@ export type BlocoDashboard = {
   grupo: GrupoBloco;
   /** Explica o bloco quando o nome não basta. */
   nota?: string;
+  /**
+   * Nasce desligado: só aparece para quem ligar em Configurações. Para
+   * blocos de consulta eventual, que não precisam ocupar a tela de todos.
+   */
+  padraoOculto?: boolean;
 };
 
 export const BLOCOS_DASHBOARD: BlocoDashboard[] = [
@@ -61,15 +66,28 @@ export const BLOCOS_DASHBOARD: BlocoDashboard[] = [
   },
   { key: "g_honorarios", label: "Honorários do escritório por mês", grupo: "Gráficos" },
   { key: "g_situacao", label: "Parcelas por situação", grupo: "Gráficos" },
+  {
+    key: "g_categorias",
+    label: "Despesas por categoria",
+    grupo: "Gráficos",
+    nota: "Para onde foi o dinheiro no período. Vem desligado.",
+    padraoOculto: true,
+  },
 ];
+
+const PADRAO_OCULTO = new Set(BLOCOS_DASHBOARD.filter((b) => b.padraoOculto).map((b) => b.key));
 
 export const GRUPOS: GrupoBloco[] = ["Blocos", "Indicadores", "Gráficos"];
 
 const chave = (userId: string | null | undefined) => `dashboard-ocultos:${userId ?? "anonimo"}`;
 
-function ler(userId: string | null | undefined): string[] {
+/** Os blocos que nascem desligados e a pessoa ligou. */
+const chaveLigados = (userId: string | null | undefined) =>
+  `dashboard-ligados:${userId ?? "anonimo"}`;
+
+function ler(userId: string | null | undefined, qual = chave): string[] {
   try {
-    const bruto = localStorage.getItem(chave(userId));
+    const bruto = localStorage.getItem(qual(userId));
     const lista = bruto ? (JSON.parse(bruto) as unknown) : [];
     return Array.isArray(lista) ? lista.filter((x): x is string => typeof x === "string") : [];
   } catch {
@@ -84,15 +102,18 @@ function ler(userId: string | null | undefined): string[] {
  */
 export function useDashboardPrefs(userId: string | null | undefined) {
   const [ocultos, setOcultos] = useState<string[]>(() => ler(userId));
+  const [ligados, setLigados] = useState<string[]>(() => ler(userId, chaveLigados));
 
   // Trocar de usuário no mesmo navegador recarrega a preferência certa.
-  useEffect(() => setOcultos(ler(userId)), [userId]);
+  useEffect(() => {
+    setOcultos(ler(userId));
+    setLigados(ler(userId, chaveLigados));
+  }, [userId]);
 
-  const gravar = useCallback(
-    (lista: string[]) => {
-      setOcultos(lista);
+  const salvar = useCallback(
+    (qual: typeof chave, lista: string[]) => {
       try {
-        localStorage.setItem(chave(userId), JSON.stringify(lista));
+        localStorage.setItem(qual(userId), JSON.stringify(lista));
       } catch {
         // Sem armazenamento: vale só nesta sessão.
       }
@@ -100,15 +121,36 @@ export function useDashboardPrefs(userId: string | null | undefined) {
     [userId],
   );
 
-  const alternar = useCallback(
-    (key: string) =>
-      gravar(ocultos.includes(key) ? ocultos.filter((k) => k !== key) : [...ocultos, key]),
-    [gravar, ocultos],
+  const mostrar = useCallback(
+    (key: string) => (PADRAO_OCULTO.has(key) ? ligados.includes(key) : !ocultos.includes(key)),
+    [ocultos, ligados],
   );
 
-  const mostrar = useCallback((key: string) => !ocultos.includes(key), [ocultos]);
+  const alternar = useCallback(
+    (key: string) => {
+      if (PADRAO_OCULTO.has(key)) {
+        const lista = ligados.includes(key) ? ligados.filter((k) => k !== key) : [...ligados, key];
+        setLigados(lista);
+        salvar(chaveLigados, lista);
+        return;
+      }
+      const lista = ocultos.includes(key) ? ocultos.filter((k) => k !== key) : [...ocultos, key];
+      setOcultos(lista);
+      salvar(chave, lista);
+    },
+    [ocultos, ligados, salvar],
+  );
 
-  const mostrarTudo = useCallback(() => gravar([]), [gravar]);
+  const mostrarTudo = useCallback(() => {
+    const todosLigados = [...PADRAO_OCULTO];
+    setOcultos([]);
+    setLigados(todosLigados);
+    salvar(chave, []);
+    salvar(chaveLigados, todosLigados);
+  }, [salvar]);
 
-  return { ocultos, alternar, mostrar, mostrarTudo };
+  /** Quantos blocos estão fora da tela agora. */
+  const escondidos = BLOCOS_DASHBOARD.filter((b) => !mostrar(b.key)).length;
+
+  return { ocultos, escondidos, alternar, mostrar, mostrarTudo };
 }

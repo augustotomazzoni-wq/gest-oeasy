@@ -104,8 +104,33 @@ export type ResultadoSync = {
   atualizados: number;
   clientesCriados: number;
   lidosDaAdvbox: number;
+  /**
+   * Contatos ou processos da Advbox que ficaram de fora de propósito: quem
+   * não é cliente de nenhum processo com número (parte contrária,
+   * testemunha, lead) e processo ainda sem número.
+   */
+  ignorados: number;
   avisos: string[];
 };
+
+/**
+ * Os ids dos contatos que são cliente de um processo com número.
+ *
+ * A Advbox guarda num cadastro só os clientes, as partes contrárias, as
+ * testemunhas e os leads. Para o GestãoEasy só interessa quem tem processo
+ * em nome dele: é o "customers" de um processo que já tem número. O resto
+ * não entra.
+ */
+function clientesDeProcessoNumerado(processos: AdvProcesso[]): Set<number> {
+  const ids = new Set<number>();
+  for (const p of processos) {
+    if (!texto(p.process_number)) continue;
+    for (const c of p.customers ?? []) {
+      if (typeof c.customer_id === "number") ids.add(c.customer_id);
+    }
+  }
+  return ids;
+}
 
 type Linha = Record<string, unknown>;
 
@@ -398,7 +423,11 @@ export async function sincronizarClientes(
   userId: string,
 ): Promise<ResultadoSync> {
   const token = await lerToken(organizationId);
-  const vindos = await buscarTudo<AdvCliente>("/customers", token);
+  const todosOsContatos = await buscarTudo<AdvCliente>("/customers", token);
+  const processos = await buscarTudo<AdvProcesso>("/lawsuits", token);
+  const clientesValidos = clientesDeProcessoNumerado(processos);
+  const vindos = todosOsContatos.filter((c) => clientesValidos.has(c.id));
+  const ignorados = todosOsContatos.length - vindos.length;
 
   const indice = indiceDeClientes(await carregarClientes(organizationId));
 
@@ -462,7 +491,8 @@ export async function sincronizarClientes(
     criados: insercoes.length,
     atualizados: atualizacoes.length,
     clientesCriados: 0,
-    lidosDaAdvbox: vindos.length,
+    lidosDaAdvbox: todosOsContatos.length,
+    ignorados,
     avisos,
   };
 }
@@ -527,7 +557,11 @@ export async function sincronizarProcessos(
   userId: string,
 ): Promise<ResultadoSync> {
   const token = await lerToken(organizationId);
-  const vindos = await buscarTudo<AdvProcesso>("/lawsuits", token);
+  const todosOsProcessos = await buscarTudo<AdvProcesso>("/lawsuits", token);
+  // Processo sem número ainda não existe na Justiça, e o cliente dele não
+  // entra pela regra acima. Fica de fora até ganhar número.
+  const vindos = todosOsProcessos.filter((p) => texto(p.process_number));
+  const ignorados = todosOsProcessos.length - vindos.length;
 
   const indiceClientes = indiceDeClientes(await carregarClientes(organizationId));
   const avisos: string[] = [];
@@ -665,7 +699,8 @@ export async function sincronizarProcessos(
     criados: insercoes.length,
     atualizados: atualizacoes.length,
     clientesCriados,
-    lidosDaAdvbox: vindos.length,
+    lidosDaAdvbox: todosOsProcessos.length,
+    ignorados,
     avisos,
   };
 }

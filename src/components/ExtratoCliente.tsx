@@ -1,8 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { todas } from "@/lib/paginar";
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -69,7 +68,7 @@ function Linha({
 }) {
   return (
     <div
-      className={`flex items-baseline justify-between gap-4 py-2 ${
+      className={`flex items-baseline justify-between gap-4 py-1 ${
         forte ? "border-t border-border font-semibold" : ""
       }`}
     >
@@ -181,14 +180,18 @@ export function ExtratoCliente({
   // ainda vai entrar e é dela.
   const totalDelaAinda = faltaRepassar + aEntrarDela;
 
+  const ordenarPorData = <T,>(lista: T[], data: (x: T) => string | null) =>
+    lista.slice().sort((a, b) => (data(a) ?? "9999").localeCompare(data(b) ?? "9999"));
+
   return (
     <Dialog open={!!clientId} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[88vh] max-w-xl overflow-y-auto">
-        <DialogHeader>
+      {/* Uma tela só, para dar o print e mandar. As três partes ficam lado a
+          lado e, se a lista for longa demais, o conteúdo inteiro encolhe para
+          caber — nada fica escondido embaixo da dobra. */}
+      <DialogContent className="flex max-h-[96vh] w-[97vw] max-w-[1200px] flex-col gap-3 overflow-hidden p-5 sm:max-w-[1200px]">
+        <DialogHeader className="pr-8">
           <DialogTitle>Extrato de {nome}</DialogTitle>
-          <DialogDescription>
-            Posição em {dateBR(todayISO())}. Esta tela foi feita para você mandar para a cliente.
-          </DialogDescription>
+          <DialogDescription>Posição em {dateBR(todayISO())}.</DialogDescription>
         </DialogHeader>
 
         {isLoading && <p className="py-8 text-center text-muted-foreground">Carregando…</p>}
@@ -199,137 +202,220 @@ export function ExtratoCliente({
         )}
 
         {!isLoading && !error && (
-          <div className="space-y-6 text-sm">
-            {/* ---------- o que já entrou ---------- */}
-            <section>
-              <h3 className="mb-1 font-display text-sm font-semibold">O que já foi recebido</h3>
-              {r.length === 0 ? (
-                <p className="py-2 text-muted-foreground">Nenhum valor recebido até agora.</p>
-              ) : (
-                <>
-                  <div className="rounded-md border border-border">
-                    {r.map((x, i) => (
-                      <div
-                        key={`${x.installment_id}-${i}`}
-                        className="flex items-baseline justify-between gap-4 border-b border-border/60 px-3 py-2 last:border-0"
-                      >
-                        <span className="text-muted-foreground">{dateBR(x.received_on)}</span>
-                        <span className="num tabular-nums">{money(x.total_amount)}</span>
-                      </div>
-                    ))}
-                  </div>
+          <CabeNaTela>
+            <div className="space-y-3 text-sm">
+              {/* ---------- a resposta que ela quer, primeiro ---------- */}
+              <section className="grid gap-3 rounded-md border-2 border-primary/30 bg-accent/30 p-3 sm:grid-cols-[1.5fr_1fr_1fr_1fr]">
+                <div>
+                  <p className="font-display font-semibold">Você ainda tem a receber</p>
+                  <p className="num text-2xl font-bold tabular-nums text-success">
+                    {money(totalDelaAinda)}
+                  </p>
+                </div>
+                <Destaque texto="Já está com você" valor={repassado + direto} />
+                <Destaque texto="Com o escritório, a repassar" valor={faltaRepassar} />
+                <Destaque texto="Ainda vai entrar (sua parte)" valor={aEntrarDela} />
+              </section>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                {/* ---------- o que já entrou ---------- */}
+                <Coluna titulo="O que já foi recebido">
+                  {r.length === 0 ? (
+                    <p className="py-1 text-xs text-muted-foreground">
+                      Nenhum valor recebido até agora.
+                    </p>
+                  ) : (
+                    <Lista
+                      itens={ordenarPorData(r, (x) => x.received_on).map((x, i) => ({
+                        chave: `${x.installment_id}-${i}`,
+                        rotulo: dateBR(x.received_on),
+                        valor: money(x.total_amount),
+                      }))}
+                    />
+                  )}
                   <div className="mt-1">
                     <Linha texto="Total recebido" valor={totalEntrou} forte />
                     <Linha texto="Parte sua" valor={dela} cor="cliente" />
                     <Linha texto="Honorários do escritório" valor={doEscritorio} cor="escritorio" />
                   </div>
-                </>
-              )}
-            </section>
+                </Coluna>
 
-            {/* ---------- o que é dela ---------- */}
-            <section>
-              <h3 className="mb-1 font-display text-sm font-semibold">O seu dinheiro</h3>
-              {direto > 0.01 && (
-                <Linha texto="Recebido direto da empresa, já com você" valor={direto} />
-              )}
-              <Linha texto="Que passou pela conta do escritório" valor={peloEscritorio} />
-              <Linha texto="Já repassado a você" valor={repassado} />
-              <Linha texto="Falta repassar" valor={faltaRepassar} forte cor="cliente" />
+                {/* ---------- o que é dela ---------- */}
+                <Coluna titulo="O seu dinheiro">
+                  {direto > 0.01 && (
+                    <Linha texto="Recebido direto da empresa, já com você" valor={direto} />
+                  )}
+                  <Linha texto="Passou pela conta do escritório" valor={peloEscritorio} />
+                  <Linha texto="Já repassado a você" valor={repassado} />
+                  <Linha texto="Falta repassar" valor={faltaRepassar} forte cor="cliente" />
+                  {t.length > 0 && (
+                    <>
+                      <p className="mt-2 text-xs font-medium text-muted-foreground">
+                        Repasses feitos a você (data do pagamento)
+                      </p>
+                      <Lista
+                        itens={ordenarPorData(t, (x) => x.paid_on ?? x.scheduled_for).map((x) => ({
+                          chave: x.id,
+                          rotulo:
+                            // Curto de propósito: com a lista em duas colunas, "Pago
+                            // em" cortava a data, que é o que importa.
+                            x.status === "pago"
+                              ? dateBR(x.paid_on)
+                              : x.status === "cancelado"
+                                ? "Cancelado"
+                                : `Prev. ${dateBR(x.scheduled_for)}`,
+                          valor: money(x.amount),
+                          riscado: x.status === "cancelado",
+                        }))}
+                      />
+                    </>
+                  )}
+                </Coluna>
 
-              {t.length > 0 && (
-                <div className="mt-2 rounded-md border border-border">
-                  {t.map((x) => (
-                    <div
-                      key={x.id}
-                      className="flex items-baseline justify-between gap-4 border-b border-border/60 px-3 py-2 text-xs last:border-0"
-                    >
-                      <span className="text-muted-foreground">
-                        {x.status === "pago"
-                          ? `Pago em ${dateBR(x.paid_on)}`
-                          : x.status === "cancelado"
-                            ? "Cancelado"
-                            : `Previsto para ${dateBR(x.scheduled_for)}`}
-                      </span>
-                      <span
-                        className={`num tabular-nums ${
-                          x.status === "cancelado" ? "text-muted-foreground line-through" : ""
-                        }`}
-                      >
-                        {money(x.amount)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* ---------- o que ainda vai entrar ---------- */}
-            <section>
-              <h3 className="mb-1 font-display text-sm font-semibold">O que ainda vai entrar</h3>
-              {emAberto.length === 0 ? (
-                <p className="py-2 text-muted-foreground">
-                  Nada em aberto — todas as parcelas já foram pagas.
-                </p>
-              ) : (
-                <>
-                  <div className="rounded-md border border-border">
-                    {emAberto
-                      .slice()
-                      .sort((a, b) => (a.due_date ?? "").localeCompare(b.due_date ?? ""))
-                      .map((x) => (
-                        <div
-                          key={x.id}
-                          className="flex items-baseline justify-between gap-4 border-b border-border/60 px-3 py-2 last:border-0"
-                        >
-                          <span className="text-muted-foreground">
-                            {x.due_date ? dateBR(x.due_date) : "Sem data definida"}
-                          </span>
-                          <span className="num tabular-nums">{money(x.balance)}</span>
-                        </div>
-                      ))}
-                  </div>
-                  <div className="mt-1">
-                    <Linha texto="Total a entrar" valor={aEntrar} forte />
-                    <Linha texto="Parte sua" valor={aEntrarDela} cor="cliente" />
-                    <Linha
-                      texto="Honorários do escritório"
-                      valor={aEntrarEscritorio}
-                      cor="escritorio"
-                    />
-                  </div>
-                </>
-              )}
-            </section>
-
-            {/* ---------- o resumo ---------- */}
-            <section className="rounded-md border-2 border-primary/30 bg-accent/30 p-4">
-              <div className="flex items-baseline justify-between gap-4">
-                <span className="font-display font-semibold">Você ainda tem a receber</span>
-                <span className="num text-xl font-bold tabular-nums text-success">
-                  {money(totalDelaAinda)}
-                </span>
+                {/* ---------- o que ainda vai entrar ---------- */}
+                <Coluna titulo="O que ainda vai entrar">
+                  {emAberto.length === 0 ? (
+                    <p className="py-1 text-xs text-muted-foreground">
+                      Nada em aberto — todas as parcelas já foram pagas.
+                    </p>
+                  ) : (
+                    <>
+                      <Lista
+                        itens={ordenarPorData(emAberto, (x) => x.due_date).map((x) => ({
+                          chave: x.id,
+                          rotulo: x.due_date ? dateBR(x.due_date) : "Sem data definida",
+                          valor: money(x.balance),
+                        }))}
+                      />
+                      <div className="mt-1">
+                        <Linha texto="Total a entrar" valor={aEntrar} forte />
+                        <Linha texto="Parte sua" valor={aEntrarDela} cor="cliente" />
+                        <Linha
+                          texto="Honorários do escritório"
+                          valor={aEntrarEscritorio}
+                          cor="escritorio"
+                        />
+                      </div>
+                    </>
+                  )}
+                </Coluna>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {money(faltaRepassar)} já estão com o escritório e serão repassados
-                {aEntrarDela > 0.01 ? `, mais ${money(aEntrarDela)} que ainda vão entrar` : ""}.
+
+              <p className="text-xs text-muted-foreground">
+                Valores conferidos em {dateBR(todayISO())}. Parcelas futuras dependem do pagamento
+                pela outra parte.
               </p>
-            </section>
-
-            <p className="text-xs text-muted-foreground">
-              Valores conferidos nesta data. Parcelas futuras dependem do pagamento pela outra
-              parte.
-            </p>
-          </div>
+            </div>
+          </CabeNaTela>
         )}
-
-        <div className="flex justify-end pt-2">
-          <Button variant="outline" onClick={onClose}>
-            Fechar
-          </Button>
-        </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Um número de apoio do quadro de cima. */
+function Destaque({ texto, valor }: { texto: string; valor: number }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{texto}</p>
+      <p className="num text-lg font-semibold tabular-nums">{money(valor)}</p>
+    </div>
+  );
+}
+
+/** Uma das três partes do extrato. */
+function Coluna({ titulo, children }: { titulo: string; children: ReactNode }) {
+  return (
+    <section className="rounded-md border border-border p-3">
+      <h3 className="mb-1 font-display text-sm font-semibold">{titulo}</h3>
+      {children}
+    </section>
+  );
+}
+
+/**
+ * Lista de datas e valores. Com muitas linhas, vira duas colunas — cabe o
+ * dobro na mesma altura e o extrato continua numa tela só.
+ */
+function Lista({
+  itens,
+}: {
+  itens: { chave: string; rotulo: string; valor: string; riscado?: boolean }[];
+}) {
+  return (
+    <div
+      className={`rounded-md border border-border text-xs ${
+        itens.length > 8 ? "grid grid-cols-2 gap-x-3" : ""
+      }`}
+    >
+      {itens.map((x) => (
+        <div
+          key={x.chave}
+          className="flex items-baseline justify-between gap-2 border-b border-border/60 px-2 py-1"
+        >
+          <span className="truncate text-muted-foreground">{x.rotulo}</span>
+          <span
+            className={`num shrink-0 tabular-nums ${
+              x.riscado ? "text-muted-foreground line-through" : ""
+            }`}
+          >
+            {x.valor}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Abaixo disto o texto fica pequeno demais para ler: aí é melhor rolar. */
+const ESCALA_MINIMA = 0.55;
+
+/**
+ * Encolhe o conteúdo, por igual, até ele caber na altura da tela.
+ *
+ * O extrato é para ser fotografado. Uma cliente com vinte parcelas deixava
+ * metade da conta embaixo da dobra, e o print saía cortado. Aqui o que não
+ * cabe é reduzido em vez de escondido; só se ficar pequeno demais para ler
+ * é que volta a rolar.
+ */
+function CabeNaTela({ children }: { children: ReactNode }) {
+  const caixa = useRef<HTMLDivElement>(null);
+  const conteudo = useRef<HTMLDivElement>(null);
+  const [escala, setEscala] = useState(1);
+
+  useLayoutEffect(() => {
+    const medir = () => {
+      const c = caixa.current;
+      const k = conteudo.current;
+      if (!c || !k) return;
+      // A escala não muda a altura de layout do conteúdo, então a medida
+      // não entra em ciclo.
+      const necessario = k.offsetHeight;
+      const disponivel = c.clientHeight;
+      if (!necessario || !disponivel) return;
+      setEscala(Math.max(Math.min(1, disponivel / necessario), ESCALA_MINIMA));
+    };
+    medir();
+    const obs = new ResizeObserver(medir);
+    if (caixa.current) obs.observe(caixa.current);
+    if (conteudo.current) obs.observe(conteudo.current);
+    return () => obs.disconnect();
+  }, []);
+
+  const rola = escala <= ESCALA_MINIMA;
+  return (
+    <div ref={caixa} className={`min-h-0 flex-1 ${rola ? "overflow-y-auto" : "overflow-hidden"}`}>
+      <div
+        ref={conteudo}
+        style={
+          escala < 1 && !rola
+            ? { transform: `scale(${escala})`, transformOrigin: "top center" }
+            : undefined
+        }
+      >
+        {children}
+      </div>
+    </div>
   );
 }
 

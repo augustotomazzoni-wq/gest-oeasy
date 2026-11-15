@@ -44,6 +44,13 @@ export function BotaoAdvbox({ tipo, recarregar }: Props) {
         `${r.criados} cadastrado(s)`,
         `${r.atualizados} atualizado(s)`,
         ...(r.clientesCriados ? [`${r.clientesCriados} cliente(s) novo(s)`] : []),
+        ...(r.ignorados
+          ? [
+              tipo === "clientes"
+                ? `${r.ignorados} contato(s) sem processo numerado deixados de fora`
+                : `${r.ignorados} processo(s) ainda sem número deixados de fora`,
+            ]
+          : []),
       ];
       toast.success(`${r.lidosDaAdvbox} registro(s) lidos da Advbox`, {
         description: partes.join(", ") + ".",
@@ -81,8 +88,8 @@ export function BotaoAdvbox({ tipo, recarregar }: Props) {
                 </p>
                 <p>
                   {tipo === "clientes"
-                    ? "Quem estiver só na Advbox entra como cliente novo."
-                    : "Processo que estiver só na Advbox entra novo, e o cliente dele é cadastrado se ainda não existir."}
+                    ? "Só entra quem é cliente de um processo com número. Parte contrária, testemunha e contato sem processo ficam de fora."
+                    : "Só entram processos que já têm número. O cliente de cada um é cadastrado se ainda não existir."}
                 </p>
                 <p className="text-xs">
                   Com a base inteira isso leva alguns segundos. Não feche a tela enquanto roda.
