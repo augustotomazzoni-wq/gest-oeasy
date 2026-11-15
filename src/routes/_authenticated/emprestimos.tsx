@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -138,6 +139,7 @@ function EmprestimosPage() {
   const { profile, canWrite } = useAuth();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [busca, setBusca] = useState("");
   const [form, setForm] = useState(EMPTY);
   const [modo, setModo] = useState<"iguais" | "colar" | "arquivo">("iguais");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -153,11 +155,18 @@ function EmprestimosPage() {
     queryKey: ["emprestimos"],
     queryFn: async () => {
       const [loans, txs, banks, cats] = await Promise.all([
-        supabase.from("loans").select("*").order("received_on", { ascending: false }),
-        supabase
-          .from("financial_transactions")
-          .select("id, loan_id, type, status, amount, due_date, paid_on, recurrence_index, recurrence_total, description")
-          .not("loan_id", "is", null),
+        todas(
+          supabase.from("loans").select("*").order("received_on", { ascending: false }).order("id"),
+        ),
+        todas(
+          supabase
+            .from("financial_transactions")
+            .select(
+              "id, loan_id, type, status, amount, due_date, paid_on, recurrence_index, recurrence_total, description",
+            )
+            .not("loan_id", "is", null)
+            .order("id"),
+        ),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
         supabase
           .from("categories")
@@ -323,12 +332,21 @@ function EmprestimosPage() {
   });
 
   /** Quanto falta pagar de cada empréstimo. */
+  const semAcento = (v: unknown) =>
+    String(v ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+  const termo = semAcento(busca).trim();
+  const emprestimosListados = (data?.loans ?? []).filter(
+    (l) =>
+      !termo || semAcento(l.lender).includes(termo) || semAcento(l.contract_number).includes(termo),
+  );
+
   const resumoDe = (loanId: string) => {
     const linhas = (data?.txs ?? []).filter((t) => t.loan_id === loanId && t.type === "saida");
     const pago = linhas.filter((t) => t.status === "pago").reduce((s, t) => s + num(t.amount), 0);
-    const aPagar = linhas
-      .filter((t) => t.status !== "pago")
-      .reduce((s, t) => s + num(t.amount), 0);
+    const aPagar = linhas.filter((t) => t.status !== "pago").reduce((s, t) => s + num(t.amount), 0);
     const proxima = linhas
       .filter((t) => t.status !== "pago" && t.due_date)
       .map((t) => t.due_date!)
@@ -375,6 +393,20 @@ function EmprestimosPage() {
         </div>
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Input
+          className="max-w-sm"
+          placeholder="Buscar por credor ou contrato…"
+          value={busca}
+          onChange={(e) => setBusca(e.target.value)}
+        />
+        {busca && (
+          <Button variant="ghost" size="sm" onClick={() => setBusca("")}>
+            Limpar
+          </Button>
+        )}
+      </div>
+
       <div className="panel overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -397,14 +429,14 @@ function EmprestimosPage() {
                 </td>
               </tr>
             )}
-            {!isLoading && (data?.loans.length ?? 0) === 0 && (
+            {!isLoading && emprestimosListados.length === 0 && (
               <tr>
                 <td colSpan={8} className="p-6 text-center text-muted-foreground">
-                  Nenhum empréstimo cadastrado.
+                  {busca ? "Nenhum empréstimo para essa busca." : "Nenhum empréstimo cadastrado."}
                 </td>
               </tr>
             )}
-            {(data?.loans ?? []).map((l) => {
+            {emprestimosListados.map((l) => {
               const r = resumoDe(l.id);
               return (
                 <tr key={l.id} className="border-b border-border/60 last:border-0">
@@ -453,8 +485,8 @@ function EmprestimosPage() {
           <DialogHeader>
             <DialogTitle>Novo empréstimo</DialogTitle>
             <DialogDescription>
-              O valor recebido entra no caixa e as parcelas viram contas a pagar — tudo marcado
-              como financiamento, fora do lucro e do custo por cliente.
+              O valor recebido entra no caixa e as parcelas viram contas a pagar — tudo marcado como
+              financiamento, fora do lucro e do custo por cliente.
             </DialogDescription>
           </DialogHeader>
 
@@ -599,8 +631,8 @@ function EmprestimosPage() {
                 )}
                 <p className="text-xs text-muted-foreground">
                   A planilha tem duas abas: <strong>Emprestimo</strong> (credor, contrato, valor
-                  recebido e data) e <strong>Parcelas</strong> (nº, vencimento e valor). O que
-                  vier preenchido na primeira aba já cai nos campos acima.
+                  recebido e data) e <strong>Parcelas</strong> (nº, vencimento e valor). O que vier
+                  preenchido na primeira aba já cai nos campos acima.
                 </p>
               </div>
             ) : modo === "iguais" ? (
@@ -663,10 +695,10 @@ function EmprestimosPage() {
                   onChange={(e) => setForm({ ...form, pasted: e.target.value })}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Uma parcela por linha. De cada linha é usado o <strong>último valor</strong> —
-                  que na tabela do contrato é o total mensal, o que realmente sai da conta. Se a
-                  linha tiver data (dd/mm/aaaa), ela é respeitada; senão os vencimentos seguem
-                  mês a mês a partir do 1º vencimento.
+                  Uma parcela por linha. De cada linha é usado o <strong>último valor</strong> — que
+                  na tabela do contrato é o total mensal, o que realmente sai da conta. Se a linha
+                  tiver data (dd/mm/aaaa), ela é respeitada; senão os vencimentos seguem mês a mês a
+                  partir do 1º vencimento.
                 </p>
               </div>
             )}
@@ -685,7 +717,8 @@ function EmprestimosPage() {
                   )}
                 </p>
                 <p className="mt-1 text-muted-foreground">
-                  De {dateBR(parcelas[0]?.due_date)} a {dateBR(parcelas[parcelas.length - 1]?.due_date)}
+                  De {dateBR(parcelas[0]?.due_date)} a{" "}
+                  {dateBR(parcelas[parcelas.length - 1]?.due_date)}
                 </p>
               </div>
             )}
@@ -704,10 +737,7 @@ function EmprestimosPage() {
             <Button variant="outline" onClick={() => setOpen(false)}>
               Cancelar
             </Button>
-            <Button
-              onClick={() => create.mutate()}
-              disabled={create.isPending || !parcelas.length}
-            >
+            <Button onClick={() => create.mutate()} disabled={create.isPending || !parcelas.length}>
               {create.isPending ? "Criando…" : `Criar com ${parcelas.length} parcela(s)`}
             </Button>
           </DialogFooter>
@@ -783,52 +813,48 @@ function EmprestimosPage() {
                       <td className="num text-right">{money(t.amount)}</td>
                       <td>
                         {pago ? (
-                          <span className="text-xs text-success">
-                            Paga em {dateBR(t.paid_on)}
-                          </span>
+                          <span className="text-xs text-success">Paga em {dateBR(t.paid_on)}</span>
                         ) : (
                           <span className="text-xs text-warning">A pagar</span>
                         )}
                       </td>
                       <td className="p-2 whitespace-nowrap">
-                        {pago ? (
-                          canWrite && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={desfazerBaixa.isPending}
-                              onClick={() => desfazerBaixa.mutate(t.id)}
-                            >
-                              Desfazer
-                            </Button>
-                          )
-                        ) : (
-                          canWrite && (
-                            <div className="flex items-center gap-1">
-                              <Input
-                                type="date"
-                                className="w-36"
-                                aria-label={`Data do pagamento da parcela ${t.recurrence_index ?? ""}`}
-                                value={datasBaixa[t.id] ?? t.due_date ?? todayISO()}
-                                onChange={(e) =>
-                                  setDatasBaixa((d) => ({ ...d, [t.id]: e.target.value }))
-                                }
-                              />
+                        {pago
+                          ? canWrite && (
                               <Button
                                 size="sm"
-                                disabled={marcarPaga.isPending}
-                                onClick={() =>
-                                  marcarPaga.mutate({
-                                    id: t.id,
-                                    data: datasBaixa[t.id] ?? t.due_date ?? todayISO(),
-                                  })
-                                }
+                                variant="ghost"
+                                disabled={desfazerBaixa.isPending}
+                                onClick={() => desfazerBaixa.mutate(t.id)}
                               >
-                                OK
+                                Desfazer
                               </Button>
-                            </div>
-                          )
-                        )}
+                            )
+                          : canWrite && (
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  type="date"
+                                  className="w-36"
+                                  aria-label={`Data do pagamento da parcela ${t.recurrence_index ?? ""}`}
+                                  value={datasBaixa[t.id] ?? t.due_date ?? todayISO()}
+                                  onChange={(e) =>
+                                    setDatasBaixa((d) => ({ ...d, [t.id]: e.target.value }))
+                                  }
+                                />
+                                <Button
+                                  size="sm"
+                                  disabled={marcarPaga.isPending}
+                                  onClick={() =>
+                                    marcarPaga.mutate({
+                                      id: t.id,
+                                      data: datasBaixa[t.id] ?? t.due_date ?? todayISO(),
+                                    })
+                                  }
+                                >
+                                  OK
+                                </Button>
+                              </div>
+                            )}
                       </td>
                     </tr>
                   );
@@ -845,8 +871,8 @@ function EmprestimosPage() {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            A data vem preenchida com o vencimento. Se pagou em outro dia, troque antes de clicar
-            em OK — é essa data que entra no caixa.
+            A data vem preenchida com o vencimento. Se pagou em outro dia, troque antes de clicar em
+            OK — é essa data que entra no caixa.
           </p>
 
           <DialogFooter>

@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -97,17 +99,23 @@ export function ExtratoCliente({
     enabled: !!clientId,
     queryFn: async () => {
       const [parcelas, repasses] = await Promise.all([
-        supabase
-          .from("v_installments")
-          .select(
-            "id, label, due_date, gross_amount, fee_amount, success_fee_amount, client_amount, paid_total, paid_client, balance, status",
-          )
-          .eq("client_id", clientId!),
-        supabase
-          .from("client_transfers")
-          .select("id, amount, scheduled_for, paid_on, status")
-          .eq("client_id", clientId!)
-          .order("paid_on", { ascending: true }),
+        todas(
+          supabase
+            .from("v_installments")
+            .select(
+              "id, label, due_date, gross_amount, fee_amount, success_fee_amount, client_amount, paid_total, paid_client, balance, status",
+            )
+            .eq("client_id", clientId!)
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("client_transfers")
+            .select("id, amount, scheduled_for, paid_on, status")
+            .eq("client_id", clientId!)
+            .order("paid_on", { ascending: true })
+            .order("id"),
+        ),
       ]);
       throwFirstError(parcelas, repasses);
 
@@ -116,14 +124,17 @@ export function ExtratoCliente({
       // cada dinheiro entrou.
       const ids = linhas.map((p) => p.id);
       const recebimentos = ids.length
-        ? await supabase
-            .from("receipts")
-            .select(
-              "installment_id, received_on, total_amount, client_amount_received_by_firm, client_amount_received_direct",
-            )
-            .in("installment_id", ids)
-            .is("reversed_at", null)
-            .order("received_on", { ascending: true })
+        ? await todas(
+            supabase
+              .from("receipts")
+              .select(
+                "installment_id, received_on, total_amount, client_amount_received_by_firm, client_amount_received_direct",
+              )
+              .in("installment_id", ids)
+              .is("reversed_at", null)
+              .order("received_on", { ascending: true })
+              .order("id"),
+          )
         : { data: [], error: null };
       throwFirstError(recebimentos);
 
@@ -150,9 +161,7 @@ export function ExtratoCliente({
   const doEscritorio = Math.max(totalEntrou - dela, 0);
 
   // ---- repasses ----
-  const repassado = t
-    .filter((x) => x.status === "pago")
-    .reduce((s, x) => s + num(x.amount), 0);
+  const repassado = t.filter((x) => x.status === "pago").reduce((s, x) => s + num(x.amount), 0);
   // O que ela recebeu direto da empresa não passa por repasse: já está com ela.
   const direto = r.reduce((s, x) => s + num(x.client_amount_received_direct), 0);
   const peloEscritorio = r.reduce((s, x) => s + num(x.client_amount_received_by_firm), 0);
@@ -321,5 +330,38 @@ export function ExtratoCliente({
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * O nome da cliente como botão. Onde aparecer — Clientes, Acordos, Parcelas
+ * ou Repasses — clicar abre o mesmo extrato. Antes havia duas janelas
+ * diferentes para a mesma pergunta, cada uma com a sua conta.
+ */
+export function ClienteLink({
+  clientId,
+  name,
+  className = "",
+}: {
+  clientId: string | null | undefined;
+  name: string | null | undefined;
+  className?: string;
+}) {
+  const [aberto, setAberto] = useState(false);
+  const nome = name || "—";
+  if (!clientId) return <span className={className}>{nome}</span>;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setAberto(true)}
+        className={`text-left underline decoration-dotted underline-offset-4 hover:text-info ${className}`}
+      >
+        {nome}
+      </button>
+      {aberto && (
+        <ExtratoCliente clientId={clientId} nome={nome} onClose={() => setAberto(false)} />
+      )}
+    </>
   );
 }

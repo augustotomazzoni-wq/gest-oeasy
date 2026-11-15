@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { createAppUser } from "@/lib/users.functions";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag } from "@/components/StatusBadge";
@@ -73,21 +74,41 @@ const MODULES: { key: string; label: string }[] = [
 
 const ACTIONS: { key: string; label: string }[] = [
   { key: "view", label: "Ver" },
-  { key: "create", label: "Incluir" },
   { key: "edit", label: "Editar" },
   { key: "delete", label: "Excluir" },
   { key: "cancel_or_reverse", label: "Cancelar/estornar" },
-  { key: "approve", label: "Aprovar" },
   { key: "export", label: "Exportar" },
 ];
 
+/**
+ * As permissões que o sistema realmente aplica, tela por tela.
+ *
+ * A matriz mostrava sete caixinhas para cada um dos catorze módulos, mas a
+ * maioria não fazia nada: marcar "Incluir clientes" para um perfil não
+ * mudava o que ele podia fazer. Aqui fica só o que tem efeito, para a tela
+ * não prometer um controle que não existe.
+ *
+ * Incluir e alterar cadastros não está na lista de propósito: isso é
+ * decidido pelo perfil (Administrador, Sócio Gestor e Financeiro), não por
+ * caixinha.
+ */
+const EFETIVAS: Record<string, string[]> = {
+  dashboard: ["view"],
+  clientes: ["view", "export"],
+  processos: ["view", "export"],
+  acordos: ["view", "edit", "delete", "cancel_or_reverse"],
+  parcelas: ["view", "cancel_or_reverse"],
+  repasses: ["view", "edit", "cancel_or_reverse"],
+  caixa: ["view", "edit", "delete", "export"],
+  categorias: ["delete"],
+  contas: ["view", "delete"],
+  importacao: ["view"],
+};
+
+const temEfeito = (modulo: string, acao: string) => (EFETIVAS[modulo] ?? []).includes(acao);
+
 const GLOBAL_ACTIONS: { key: string; label: string }[] = [
-  { key: "manage_categories", label: "Administrar categorias" },
-  { key: "manage_users", label: "Administrar usuários" },
-  { key: "manage_roles", label: "Administrar perfis" },
-  { key: "view_sensitive_financials", label: "Ver dados financeiros sensíveis" },
-  { key: "confirm_direct_receipt", label: "Confirmar recebimento direto" },
-  { key: "manage_collections", label: "Gerir cobranças" },
+  { key: "manage_users", label: "Administrar usuários e perfis" },
 ];
 
 const EMPTY_NEW_USER = { email: "", full_name: "", password: "", role: "consulta" as AppRole };
@@ -123,7 +144,7 @@ function UsuariosPage() {
     queryFn: async () => {
       const [defs, perms] = await Promise.all([
         supabase.from("role_definitions").select("*").order("name"),
-        supabase.from("role_permissions").select("*"),
+        todas(supabase.from("role_permissions").select("*").order("id")),
       ]);
       if (defs.error) throw defs.error;
       if (perms.error) throw perms.error;
@@ -139,11 +160,12 @@ function UsuariosPage() {
 
   const setRole = useMutation({
     mutationFn: async ({ userId, role }: { userId: string; role: AppRole }) => {
-      const del = await supabase.from("user_roles").delete().eq("user_id", userId);
-      if (del.error) throw del.error;
-      const { error } = await supabase
-        .from("user_roles")
-        .insert({ user_id: userId, role: role as never });
+      // Uma chamada só: apagar o perfil antigo e gravar o novo em dois
+      // pedidos deixava a pessoa sem perfil se o segundo falhasse.
+      const { error } = await supabase.rpc("set_user_role", {
+        _user_id: userId,
+        _role: role as never,
+      });
       if (error) throw error;
     },
     onSuccess: () => {
@@ -416,6 +438,11 @@ function UsuariosPage() {
               visualizando em modo leitura.
             </div>
           )}
+          <div className="panel p-4 text-sm text-muted-foreground">
+            Aparecem só as permissões que o sistema aplica. “Ver” libera a tela e a leitura dos
+            dados dela. Incluir e alterar cadastros não depende destas caixinhas: vale para os
+            perfis Administrador, Sócio Gestor e Financeiro.
+          </div>
           {(matrix?.defs ?? []).map((def) => {
             const readOnly = !isMainAdmin || def.code === "admin";
             return (
@@ -438,11 +465,19 @@ function UsuariosPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {MODULES.map((m) => (
+                    {MODULES.filter((m) => EFETIVAS[m.key]).map((m) => (
                       <tr key={m.key} className="border-b border-border/60 last:border-0">
                         <td className="p-3">{m.label}</td>
                         {ACTIONS.map((a) => {
                           const checked = matrix?.set.has(`${def.code}|${m.key}|${a.key}`) ?? false;
+                          // Combinação que o sistema não usa: sem caixinha.
+                          if (!temEfeito(m.key, a.key)) {
+                            return (
+                              <td key={a.key} className="p-2 text-center text-muted-foreground/40">
+                                ·
+                              </td>
+                            );
+                          }
                           return (
                             <td key={a.key} className="p-2 text-center">
                               <input
@@ -465,7 +500,10 @@ function UsuariosPage() {
                       </tr>
                     ))}
                     <tr className="bg-muted/40">
-                      <td className="p-3 text-xs text-muted-foreground uppercase" colSpan={7}>
+                      <td
+                        className="p-3 text-xs text-muted-foreground uppercase"
+                        colSpan={ACTIONS.length + 1}
+                      >
                         Permissões gerais
                       </td>
                     </tr>
@@ -474,7 +512,7 @@ function UsuariosPage() {
                       return (
                         <tr key={g.key} className="border-b border-border/60 last:border-0">
                           <td className="p-3">{g.label}</td>
-                          <td className="p-2 text-center" colSpan={6}>
+                          <td className="p-2 text-center" colSpan={ACTIONS.length}>
                             <input
                               type="checkbox"
                               className="size-4 accent-[var(--primary)]"

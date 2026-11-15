@@ -2,6 +2,8 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
+import { criarReconhecedor } from "@/lib/reconhecer-cliente";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +14,6 @@ import { friendlyError } from "@/lib/errors";
 import { parseWorkbook, matchKey, type ParsedWorkbook } from "@/lib/import-xlsx";
 import {
   parseAdvboxWorkbook,
-  onlyDigits,
   clientsToAdvboxRows,
   casesToAdvboxRows,
   type AdvboxParse,
@@ -98,11 +99,9 @@ function ImportarPage() {
     setExporting(kind);
     try {
       if (kind === "clientes") {
-        const { data, error } = await supabase
-          .from("clients")
-          .select("*")
-          .is("deleted_at", null)
-          .order("name");
+        const { data, error } = await todas(
+          supabase.from("clients").select("*").is("deleted_at", null).order("name").order("id"),
+        );
         if (error) throw error;
         downloadXlsx(
           `clientes_${todayISO()}.xlsx`,
@@ -110,11 +109,14 @@ function ImportarPage() {
           clientsToAdvboxRows((data ?? []) as never),
         );
       } else {
-        const { data, error } = await supabase
-          .from("cases")
-          .select("*, clients(name, tax_id)")
-          .is("deleted_at", null)
-          .order("created_at", { ascending: false });
+        const { data, error } = await todas(
+          supabase
+            .from("cases")
+            .select("*, clients(name, tax_id)")
+            .is("deleted_at", null)
+            .order("created_at", { ascending: false })
+            .order("id"),
+        );
         if (error) throw error;
         const rows = (data ?? []).map((k) => {
           const cli = k.clients as { name: string; tax_id: string | null } | null;
@@ -254,8 +256,7 @@ function ImportarPage() {
           const catId = e.category
             ? (catPorChave.get(`${tipo}|${matchKey(e.category)}`) ?? null)
             : null;
-          const contaId =
-            contaPorNome.get(matchKey(e.account ?? "Conta principal")) ?? null;
+          const contaId = contaPorNome.get(matchKey(e.account ?? "Conta principal")) ?? null;
           const pago = !!e.paid_on;
           const { error } = await supabase.from("financial_transactions").insert({
             organization_id: org,
@@ -306,20 +307,20 @@ function ImportarPage() {
       }
 
       // Base atual para casar por CPF/CNPJ (ou pelo nome, quando não há CPF).
-      const { data: existing, error: exErr } = await supabase
-        .from("clients")
-        .select("id, name, tax_id")
-        .is("deleted_at", null);
+      const { data: existing, error: exErr } = await todas(
+        supabase.from("clients").select("id, name, tax_id").is("deleted_at", null).order("id"),
+      );
       if (exErr) throw exErr;
-      const byTax = new Map<string, string>();
-      const byName = new Map<string, string>();
-      for (const c of existing ?? []) {
-        const d = onlyDigits(c.tax_id);
-        if (d) byTax.set(d, c.id);
-        byName.set(matchKey(c.name), c.id);
-      }
-      const findClient = (name: string, taxId: string | null) =>
-        byTax.get(onlyDigits(taxId)) ?? byName.get(matchKey(name));
+      const clientes = criarReconhecedor(existing ?? []);
+      // Nomes repetidos que nenhum documento desempata: ficam de fora em vez
+      // de serem colados no cadastro errado.
+      const ambiguos: string[] = [];
+      // A planilha completa o cadastro, não o substitui: célula vazia não
+      // apaga o que já foi preenchido aqui dentro.
+      const soPreenchidos = <T extends Record<string, unknown>>(linha: T): Partial<T> =>
+        Object.fromEntries(
+          Object.entries(linha).filter(([, v]) => v !== null && v !== undefined && v !== ""),
+        ) as Partial<T>;
 
       if (advbox.kind === "clientes") {
         let criados = 0;
@@ -349,10 +350,18 @@ function ImportarPage() {
             source: c.source,
             notes: c.notes,
           };
-          const id = findClient(c.name, c.tax_id);
-          if (id) {
-            const { error } = await supabase.from("clients").update(payload).eq("id", id);
+          const achado = clientes.reconhecer(null, c.tax_id, c.name);
+          if (achado.tipo === "ambiguo") {
+            ambiguos.push(c.name);
+            continue;
+          }
+          if (achado.tipo === "achou") {
+            const { error } = await supabase
+              .from("clients")
+              .update(soPreenchidos(payload))
+              .eq("id", achado.id);
             if (error) throw new Error(`${c.name}: ${friendlyError(error)}`);
+            clientes.registrar(achado.id, null, c.tax_id, c.name);
             atualizados += 1;
           } else {
             const { data, error } = await supabase
@@ -361,19 +370,20 @@ function ImportarPage() {
               .select("id")
               .single();
             if (error) throw new Error(`${c.name}: ${friendlyError(error)}`);
-            const d = onlyDigits(c.tax_id);
-            if (d) byTax.set(d, data.id);
-            byName.set(matchKey(c.name), data.id);
+            clientes.registrar(data.id, null, c.tax_id, c.name);
             criados += 1;
           }
         }
         messages.push(`${criados} cliente(s) cadastrado(s) e ${atualizados} atualizado(s).`);
       } else {
         // Processos: casa pelo número; sem número, casa por cliente + parte contrária.
-        const { data: existingCases, error: ecErr } = await supabase
-          .from("cases")
-          .select("id, case_number, client_id, opposing_party")
-          .is("deleted_at", null);
+        const { data: existingCases, error: ecErr } = await todas(
+          supabase
+            .from("cases")
+            .select("id, case_number, client_id, opposing_party")
+            .is("deleted_at", null)
+            .order("id"),
+        );
         if (ecErr) throw ecErr;
         const byNumber = new Map<string, string>();
         const byPair = new Map<string, string>();
@@ -386,7 +396,12 @@ function ImportarPage() {
         let atualizados = 0;
         let clientesCriados = 0;
         for (const k of advbox.cases) {
-          let clientId = findClient(k.client_name, k.client_tax_id);
+          const achado = clientes.reconhecer(null, k.client_tax_id, k.client_name);
+          if (achado.tipo === "ambiguo") {
+            ambiguos.push(k.client_name);
+            continue;
+          }
+          let clientId = achado.tipo === "achou" ? achado.id : undefined;
           if (!clientId) {
             // A planilha de processos traz nome e CPF: cria o cliente para não
             // perder o registro e avisa para completar o cadastro depois.
@@ -403,9 +418,7 @@ function ImportarPage() {
               .single();
             if (error) throw new Error(`Cliente ${k.client_name}: ${friendlyError(error)}`);
             clientId = data.id;
-            const d = onlyDigits(k.client_tax_id);
-            if (d) byTax.set(d, clientId);
-            byName.set(matchKey(k.client_name), clientId);
+            clientes.registrar(data.id, null, k.client_tax_id, k.client_name);
             clientesCriados += 1;
           }
 
@@ -446,7 +459,10 @@ function ImportarPage() {
 
           const rotulo = k.case_number ?? k.client_name;
           if (id) {
-            const { error } = await supabase.from("cases").update(payload).eq("id", id);
+            const { error } = await supabase
+              .from("cases")
+              .update(soPreenchidos(payload))
+              .eq("id", id);
             if (error) throw new Error(`Processo ${rotulo}: ${friendlyError(error)}`);
             atualizados += 1;
           } else {
@@ -467,6 +483,13 @@ function ImportarPage() {
             `${clientesCriados} cliente(s) criados a partir da planilha de processos — complete o cadastro depois.`,
           );
         }
+      }
+
+      if (ambiguos.length) {
+        const nomes = [...new Set(ambiguos)];
+        messages.push(
+          `${nomes.length} nome(s) ficaram de fora porque há mais de um cadastro igual e nenhum CPF para desempatar: ${nomes.slice(0, 5).join(", ")}${nomes.length > 5 ? "…" : ""}. Preencha o CPF em um deles e importe de novo.`,
+        );
       }
 
       await supabase.from("audit_logs").insert({
@@ -496,10 +519,9 @@ function ImportarPage() {
       const org = profile.organization_id;
       const messages: string[] = [];
 
-      const { data: existing } = await supabase
-        .from("clients")
-        .select("id, name")
-        .is("deleted_at", null);
+      const { data: existing } = await todas(
+        supabase.from("clients").select("id, name").is("deleted_at", null).order("id"),
+      );
       const seenPerClient = new Map<string, number>();
       const clientIds = new Map((existing ?? []).map((c) => [matchKey(c.name), c.id] as const));
 

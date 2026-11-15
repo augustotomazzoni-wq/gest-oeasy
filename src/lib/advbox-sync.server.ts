@@ -18,6 +18,8 @@
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { todas } from "@/lib/paginar";
+import { chaveNome, criarReconhecedor } from "@/lib/reconhecer-cliente";
 
 const BASE = "https://app.advbox.com.br/api/v1";
 
@@ -114,20 +116,6 @@ type Linha = Record<string, unknown>;
 function texto(v: unknown): string | null {
   const s = String(v ?? "").trim();
   return s ? s : null;
-}
-
-function somenteDigitos(v: unknown): string {
-  return String(v ?? "").replace(/\D+/g, "");
-}
-
-/** Nome sem acento, sem espaço dobrado e em minúsculas, só para comparar. */
-function chaveNome(v: unknown): string {
-  return String(v ?? "")
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
 }
 
 /**
@@ -375,50 +363,34 @@ function valoresCliente(c: AdvCliente): Linha {
 type ClienteLocal = Linha & { id: string };
 
 async function carregarClientes(organizationId: string): Promise<ClienteLocal[]> {
-  const { data, error } = await supabaseAdmin
-    .from("clients")
-    .select(`id, ${COLUNAS_CLIENTE.join(", ")}`)
-    .eq("organization_id", organizationId)
-    .is("deleted_at", null);
+  const { data, error } = await todas(
+    supabaseAdmin
+      .from("clients")
+      .select(`id, ${COLUNAS_CLIENTE.join(", ")}`)
+      .eq("organization_id", organizationId)
+      .is("deleted_at", null)
+      .order("id"),
+  );
   if (error) throw new Error("Não foi possível ler o cadastro de clientes.");
   return (data ?? []) as unknown as ClienteLocal[];
 }
 
 /**
- * Onde cada cliente já cadastrado pode ser reconhecido: pelo id da
- * Advbox, pelo CPF ou pelo nome, nessa ordem de confiança.
+ * Reconhece cliente já cadastrado (regra em reconhecer-cliente.ts) e guarda
+ * a linha de cada um, para a mescla saber o que já está preenchido aqui.
  */
 function indiceDeClientes(lista: ClienteLocal[]) {
-  const porAdvbox = new Map<number, string>();
-  const porCpf = new Map<string, string>();
-  const porNome = new Map<string, string>();
-  const porId = new Map<string, ClienteLocal>();
-
-  const registrar = (
-    id: string,
-    advboxId: unknown,
-    taxId: unknown,
-    nome: unknown,
-    linha?: ClienteLocal,
-  ) => {
-    if (typeof advboxId === "number") porAdvbox.set(advboxId, id);
-    const d = somenteDigitos(taxId);
-    if (d) porCpf.set(d, id);
-    const n = chaveNome(nome);
-    if (n) porNome.set(n, id);
-    if (linha) porId.set(id, linha);
-  };
-
-  for (const c of lista) registrar(c.id, c["advbox_id"], c["tax_id"], c["name"], c);
-
-  const achar = (advboxId: unknown, taxId: unknown, nome: unknown): string | undefined =>
-    (typeof advboxId === "number" ? porAdvbox.get(advboxId) : undefined) ??
-    porCpf.get(somenteDigitos(taxId)) ??
-    porNome.get(chaveNome(nome));
-
+  const reconhecedor = criarReconhecedor(
+    lista.map((c) => ({
+      id: c.id,
+      name: c["name"],
+      tax_id: c["tax_id"],
+      advbox_id: c["advbox_id"],
+    })),
+  );
+  const porId = new Map(lista.map((c) => [c.id, c]));
   const linhaDe = (id: string): ClienteLocal | undefined => porId.get(id);
-
-  return { achar, registrar, linhaDe };
+  return { achar: reconhecedor.reconhecer, registrar: reconhecedor.registrar, linhaDe };
 }
 
 export async function sincronizarClientes(
@@ -445,7 +417,14 @@ export async function sincronizarClientes(
     }
 
     const daAdvbox = valoresCliente(c);
-    const id = indice.achar(c.id, c.identification, nome);
+    const achado = indice.achar(c.id, c.identification, nome);
+    if (achado.tipo === "ambiguo") {
+      avisos.push(
+        `${nome}: há mais de um cadastro com esse nome e nenhum CPF para desempatar — ficou de fora.`,
+      );
+      continue;
+    }
+    const id = achado.tipo === "achou" ? achado.id : undefined;
 
     if (id) {
       if (jaNoLote.has(id)) continue;
@@ -561,7 +540,8 @@ export async function sincronizarProcessos(
     const titular = (p.customers ?? []).find((c) => texto(c.name));
     if (!titular) continue;
     const nome = texto(titular.name) as string;
-    if (indiceClientes.achar(titular.customer_id, titular.identification, nome)) continue;
+    const achado = indiceClientes.achar(titular.customer_id, titular.identification, nome);
+    if (achado.tipo !== "novo") continue;
     const chave = titular.customer_id ?? `nome:${chaveNome(nome)}`;
     if (faltantes.has(chave)) continue;
     faltantes.set(chave, {
@@ -592,11 +572,14 @@ export async function sincronizarProcessos(
   }
 
   // ---- 2) Os processos ----
-  const { data: locais, error: errLocais } = await supabaseAdmin
-    .from("cases")
-    .select(`id, ${COLUNAS_PROCESSO.join(", ")}`)
-    .eq("organization_id", organizationId)
-    .is("deleted_at", null);
+  const { data: locais, error: errLocais } = await todas(
+    supabaseAdmin
+      .from("cases")
+      .select(`id, ${COLUNAS_PROCESSO.join(", ")}`)
+      .eq("organization_id", organizationId)
+      .is("deleted_at", null)
+      .order("id"),
+  );
   if (errLocais) throw new Error("Não foi possível ler o cadastro de processos.");
 
   const porAdvbox = new Map<number, string>();
@@ -627,15 +610,20 @@ export async function sincronizarProcessos(
       continue;
     }
 
-    const clientId = indiceClientes.achar(
+    const achado = indiceClientes.achar(
       titular.customer_id,
       titular.identification,
       texto(titular.name),
     );
-    if (!clientId) {
-      avisos.push(`Processo ${rotulo}: o cliente ${texto(titular.name)} não pôde ser cadastrado.`);
+    if (achado.tipo !== "achou") {
+      avisos.push(
+        achado.tipo === "ambiguo"
+          ? `Processo ${rotulo}: há mais de uma cliente chamada ${texto(titular.name)} e nenhum CPF para desempatar — ficou de fora.`
+          : `Processo ${rotulo}: o cliente ${texto(titular.name)} não pôde ser cadastrado.`,
+      );
       continue;
     }
+    const clientId = achado.id;
 
     const daAdvbox = valoresProcesso(p, clientId);
     const numero = texto(p.process_number);

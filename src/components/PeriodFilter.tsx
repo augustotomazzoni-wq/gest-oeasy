@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PERIOD_OPTIONS, shiftAnchor, type PeriodType } from "@/lib/period";
@@ -16,6 +17,7 @@ export function PeriodFilter({
   customEnd,
   onCustomStartChange,
   onCustomEndChange,
+  compacto = false,
 }: {
   type: PeriodType;
   onTypeChange: (type: PeriodType) => void;
@@ -25,19 +27,35 @@ export function PeriodFilter({
   customEnd: string;
   onCustomStartChange: (value: string) => void;
   onCustomEndChange: (value: string) => void;
+  /**
+   * Mostra só as setas e o campo, com os botões de Dia/Semana/Mês/Ano
+   * recolhidos atrás de "Outro recorte". É para os filtros secundários de
+   * uma tela: três fileiras iguais de botões, uma embaixo da outra, faziam
+   * parecer que eram o mesmo filtro repetido.
+   */
+  compacto?: boolean;
 }) {
+  const [aberto, setAberto] = useState(false);
+  const recolhido = compacto && !aberto && type !== "personalizado";
+
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {PERIOD_OPTIONS.map(([key, label]) => (
-        <Button
-          key={key}
-          size="sm"
-          variant={type === key ? "default" : "outline"}
-          onClick={() => onTypeChange(key)}
-        >
-          {label}
+      {recolhido ? (
+        <Button size="sm" variant="ghost" onClick={() => setAberto(true)}>
+          Outro recorte
         </Button>
-      ))}
+      ) : (
+        PERIOD_OPTIONS.map(([key, label]) => (
+          <Button
+            key={key}
+            size="sm"
+            variant={type === key ? "default" : "outline"}
+            onClick={() => onTypeChange(key)}
+          >
+            {label}
+          </Button>
+        ))
+      )}
 
       {type === "personalizado" ? (
         <div className="flex flex-wrap items-center gap-1">

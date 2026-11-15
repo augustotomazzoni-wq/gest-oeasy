@@ -14,6 +14,7 @@ import {
   LogOut,
   Menu,
   Upload,
+  History,
   X,
 } from "lucide-react";
 import { useAuth, ROLE_LABEL, type AppRole } from "@/hooks/useAuth";
@@ -24,7 +25,7 @@ import { cn } from "@/lib/utils";
 // a permissão não vê o item: antes o menu mostrava tudo e as telas abriam
 // zeradas (o RLS filtra as linhas em vez de dar erro), o que fazia "R$ 0,00"
 // parecer um fato em vez de falta de acesso.
-const NAV = [
+export const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, module: "dashboard" },
   { to: "/clientes", label: "Clientes", icon: Users, module: "clientes" },
   { to: "/processos", label: "Processos", icon: Briefcase, module: "processos" },
@@ -38,17 +39,22 @@ const NAV = [
 ] as const;
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { profile, roles, allows, can, signOut } = useAuth();
+  const { profile, roles, allows, can, isAdmin, signOut } = useAuth();
   const [open, setOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   const visible = NAV.filter((item) => can(item.module, "view"));
-  const items = allows("manage_users")
-    ? [
-        ...visible,
-        { to: "/usuarios", label: "Usuários e Acessos", icon: ShieldCheck, module: "usuarios" },
-      ]
-    : visible;
+  const items = [
+    ...visible,
+    ...(allows("manage_users")
+      ? [{ to: "/usuarios", label: "Usuários e Acessos", icon: ShieldCheck, module: "usuarios" }]
+      : []),
+    // O registro de quem fez o quê é só do Administrador — é o mesmo corte
+    // que o banco aplica na leitura.
+    ...(isAdmin
+      ? [{ to: "/auditoria", label: "Auditoria", icon: History, module: "auditoria" }]
+      : []),
+  ];
 
   return (
     <div className="flex min-h-screen bg-background">

@@ -39,9 +39,9 @@ export const BLOCOS_DASHBOARD: BlocoDashboard[] = [
 
   // ---- indicadores ----
   { key: "saldo", label: "Saldo em contas", grupo: "Indicadores" },
-  { key: "receita", label: "Receita realizada do escritório", grupo: "Indicadores" },
-  { key: "despesas", label: "Despesas pagas", grupo: "Indicadores" },
-  { key: "resultado", label: "Resultado de caixa", grupo: "Indicadores" },
+  { key: "receita", label: "Receita realizada do escritório (acumulado)", grupo: "Indicadores" },
+  { key: "despesas", label: "Despesas pagas (acumulado)", grupo: "Indicadores" },
+  { key: "resultado", label: "Resultado da operação (acumulado)", grupo: "Indicadores" },
   { key: "aguardando", label: "Aguardando repasse", grupo: "Indicadores" },
   { key: "repassado", label: "Já repassado", grupo: "Indicadores" },
   { key: "confirmados", label: "Recebíveis confirmados", grupo: "Indicadores" },

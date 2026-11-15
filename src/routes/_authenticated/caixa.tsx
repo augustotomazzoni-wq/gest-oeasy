@@ -1,7 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +38,12 @@ import {
 import { useAuth } from "@/hooks/useAuth";
 import { PeriodFilter } from "@/components/PeriodFilter";
 import {
+  ALL_FIELDS,
+  FieldFilter,
+  makeFieldMatcher,
+  type FilterField,
+} from "@/components/FieldFilter";
+import {
   monthLabel,
   periodLabel,
   periodRange,
@@ -61,6 +68,11 @@ import { dropUndefined } from "@/lib/utils";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/caixa")({
+  // O alerta do dashboard traz direto para as contas vencidas.
+  validateSearch: (search: Record<string, unknown>): { filtro?: string } => {
+    const filtro = search["filtro"];
+    return typeof filtro === "string" ? { filtro } : {};
+  },
   head: () => ({
     meta: [
       { title: "Fluxo de Caixa | Gestão Financeira do Escritório" },
@@ -112,6 +124,9 @@ const EMPTY_TRANSFER = { from: "", to: "", amount: "", date: "", notes: "" };
 const isTransfer = (t: { source_type: string | null }) =>
   t.source_type === TRANSFER_OUT || t.source_type === TRANSFER_IN;
 
+/** Como aparece a despesa lançada sem categoria. */
+const SEM_CATEGORIA = "Sem categoria";
+
 type TxRow = {
   id: string;
   type: string;
@@ -137,6 +152,21 @@ type TxRow = {
   clients: { name: string } | null;
 };
 
+/** Por onde dá para procurar um lançamento. */
+const CAMPOS_CAIXA: FilterField<TxRow>[] = [
+  { key: "descricao", label: "Descrição", get: (t) => t.description ?? "" },
+  { key: "cliente", label: "Cliente", get: (t) => t.clients?.name ?? "" },
+  { key: "categoria", label: "Categoria", get: (t) => t.categories?.name ?? SEM_CATEGORIA },
+  { key: "conta", label: "Conta bancária", get: (t) => t.bank_accounts?.name ?? "" },
+  {
+    key: "forma",
+    label: "Forma de pagamento",
+    get: (t) => (t.payment_method ? (PAYMENT_METHOD_LABEL[t.payment_method] ?? "") : ""),
+  },
+  { key: "valor", label: "Valor", get: (t) => money(t.amount) },
+  { key: "obs", label: "Observações", get: (t) => t.notes ?? "" },
+];
+
 /** A data que vale para o lançamento: pagamento quando pago, vencimento quando previsto. */
 function refDate(t: { status: string; paid_on: string | null; due_date: string | null }) {
   return (t.status === "pago" ? t.paid_on : t.due_date) ?? t.paid_on ?? t.due_date ?? "";
@@ -159,7 +189,17 @@ function CaixaPage() {
   const [anchor, setAnchor] = useState(today);
   const [customStart, setCustomStart] = useState(today.slice(0, 8) + "01");
   const [customEnd, setCustomEnd] = useState(today);
-  const [view, setView] = useState<"todos" | "pago" | "previsto">("todos");
+  const { filtro } = Route.useSearch();
+  // "vencidas" é um recorte à parte: mostra o que venceu e continua em
+  // aberto, de qualquer mês — é justamente o que some quando o mês vira.
+  const [view, setView] = useState<"todos" | "pago" | "previsto" | "vencidas">(
+    filtro === "vencidas" ? "vencidas" : "todos",
+  );
+  useEffect(() => {
+    if (filtro === "vencidas") setView("vencidas");
+  }, [filtro]);
+  const [field, setField] = useState(ALL_FIELDS);
+  const [search, setSearch] = useState("");
   // Filtro de tipo, que se combina com o de situação acima: dá para ver "só
   // despesas ainda a pagar" marcando um de cada.
   const [kind, setKind] = useState<"todos" | "receitas" | "despesas">("todos");
@@ -184,32 +224,51 @@ function CaixaPage() {
       // Pago entra pela data em que o dinheiro andou; previsto entra pelo
       // vencimento — senão conta a pagar nenhuma apareceria (ela não tem
       // data de pagamento ainda).
-      const [pagas, previstas, banks, cats, balances] = await Promise.all([
-        supabase
-          .from("financial_transactions")
-          .select("*, bank_accounts(name), categories(name), clients(name)")
-          .eq("status", "pago")
-          .gte("paid_on", start)
-          .lte("paid_on", end)
-          .order("paid_on", { ascending: false }),
-        supabase
-          .from("financial_transactions")
-          .select("*, bank_accounts(name), categories(name), clients(name)")
-          .eq("status", "previsto")
-          .gte("due_date", start)
-          .lte("due_date", end)
-          .order("due_date", { ascending: true }),
+      const [pagas, previstas, vencidas, banks, cats, balances] = await Promise.all([
+        todas(
+          supabase
+            .from("financial_transactions")
+            .select("*, bank_accounts(name), categories(name), clients(name)")
+            .eq("status", "pago")
+            .gte("paid_on", start)
+            .lte("paid_on", end)
+            .order("paid_on", { ascending: false })
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("financial_transactions")
+            .select("*, bank_accounts(name), categories(name), clients(name)")
+            .eq("status", "previsto")
+            .gte("due_date", start)
+            .lte("due_date", end)
+            .order("due_date", { ascending: true })
+            .order("id"),
+        ),
+        // O que venceu e ninguém deu baixa, de qualquer mês. Sem esta busca a
+        // conta de outubro não paga sumia da tela assim que virava novembro.
+        todas(
+          supabase
+            .from("financial_transactions")
+            .select("*, bank_accounts(name), categories(name), clients(name)")
+            .eq("status", "previsto")
+            .lt("due_date", today)
+            .order("due_date", { ascending: true })
+            .order("id"),
+        ),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
         supabase.from("categories").select("id, name, type").eq("active", true).order("name"),
         supabase.from("v_bank_balances").select("*"),
       ]);
       if (pagas.error) throw pagas.error;
       if (previstas.error) throw previstas.error;
+      if (vencidas.error) throw vencidas.error;
       return {
         transactions: [
           ...((pagas.data ?? []) as unknown as TxRow[]),
           ...((previstas.data ?? []) as unknown as TxRow[]),
         ],
+        overdue: (vencidas.data ?? []) as unknown as TxRow[],
         banks: banks.data ?? [],
         categories: cats.data ?? [],
         balances: (balances.data ?? []) as unknown as {
@@ -224,9 +283,11 @@ function CaixaPage() {
   const rows = useMemo(() => {
     const all = data?.transactions ?? [];
     const porSituacao =
-      view === "todos"
-        ? all
-        : all.filter((t) => (view === "pago" ? t.status === "pago" : t.status !== "pago"));
+      view === "vencidas"
+        ? (data?.overdue ?? [])
+        : view === "todos"
+          ? all
+          : all.filter((t) => (view === "pago" ? t.status === "pago" : t.status !== "pago"));
     // Receita é tudo que entrou, despesa é tudo que saiu — empréstimo incluído,
     // para nenhuma linha do caixa sumir quando se filtra. Os cards acima é que
     // deixam o empréstimo de fora, porque ali a pergunta é o resultado.
@@ -237,8 +298,37 @@ function CaixaPage() {
             (t) =>
               !isTransfer(t) && (kind === "receitas" ? t.type === "entrada" : t.type === "saida"),
           );
-    return [...filtered].sort((a, b) => refDate(b).localeCompare(refDate(a)));
-  }, [data, view, kind]);
+    const combina = makeFieldMatcher(CAMPOS_CAIXA, field, search);
+    return filtered.filter(combina).sort((a, b) => refDate(b).localeCompare(refDate(a)));
+  }, [data, view, kind, field, search]);
+
+  // O que venceu e segue em aberto, separado em a pagar e a receber.
+  const vencido = useMemo(() => {
+    const t = { quantos: 0, aPagar: 0, aReceber: 0 };
+    for (const r of data?.overdue ?? []) {
+      t.quantos += 1;
+      if (r.type === "saida" || r.type === "repasse_de_terceiros") t.aPagar += num(r.amount);
+      else t.aReceber += num(r.amount);
+    }
+    return t;
+  }, [data]);
+
+  // Para onde foi o dinheiro: despesas pagas no período, por categoria.
+  // Empréstimo e transferência ficam de fora pelo mesmo motivo que ficam
+  // fora do resultado — não são custo de operar.
+  const porCategoria = useMemo(() => {
+    const mapa = new Map<string, number>();
+    for (const r of data?.transactions ?? []) {
+      if (r.status !== "pago" || r.type !== "saida" || r.is_financing || isTransfer(r)) continue;
+      const nome = r.categories?.name ?? SEM_CATEGORIA;
+      mapa.set(nome, (mapa.get(nome) ?? 0) + num(r.amount));
+    }
+    const lista = [...mapa.entries()]
+      .map(([nome, valor]) => ({ nome, valor }))
+      .sort((a, b) => b.valor - a.valor);
+    const total = lista.reduce((s, c) => s + c.valor, 0);
+    return { lista, total };
+  }, [data]);
 
   const totals = useMemo(() => {
     const t = {
@@ -423,8 +513,7 @@ function CaixaPage() {
       const valor = num(Number(transfer.amount));
       if (!transfer.from) throw new Error("Escolha a conta de origem");
       if (!transfer.to) throw new Error("Escolha a conta de destino");
-      if (transfer.from === transfer.to)
-        throw new Error("A origem e o destino são a mesma conta");
+      if (transfer.from === transfer.to) throw new Error("A origem e o destino são a mesma conta");
       if (valor <= 0) throw new Error("Informe um valor maior que zero");
       if (!transfer.date) throw new Error("Informe a data da transferência");
 
@@ -480,8 +569,7 @@ function CaixaPage() {
       closeTransfer();
       void qc.invalidateQueries();
     },
-    onError: (e: Error) =>
-      toast.error("Erro na transferência", { description: friendlyError(e) }),
+    onError: (e: Error) => toast.error("Erro na transferência", { description: friendlyError(e) }),
   });
 
   const removeTransfer = useMutation({
@@ -622,11 +710,30 @@ function CaixaPage() {
         }
       />
 
+      {/* Conta vencida não pode depender de alguém lembrar de voltar ao mês
+          dela: o aviso fica aqui em cima, em qualquer período. */}
+      {vencido.quantos > 0 && view !== "vencidas" && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 p-3">
+          <p className="text-sm">
+            <span className="font-medium">
+              {vencido.quantos} lançamento(s) vencido(s) e ainda em aberto
+            </span>
+            {vencido.aPagar > 0.01 && <> — {money(vencido.aPagar)} a pagar</>}
+            {vencido.aReceber > 0.01 && <> — {money(vencido.aReceber)} a receber</>}.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => setView("vencidas")}>
+            Ver vencidas
+          </Button>
+        </div>
+      )}
+
       <div className="panel mb-4 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="font-display text-sm font-semibold">Competência: {competencia}</h2>
-            <p className="text-xs text-muted-foreground">{periodLabel(periodType, anchor, custom)}</p>
+            <p className="text-xs text-muted-foreground">
+              {periodLabel(periodType, anchor, custom)}
+            </p>
           </div>
           <PeriodFilter
             type={periodType}
@@ -646,6 +753,7 @@ function CaixaPage() {
               ["todos", "Todos"],
               ["pago", "Pagos"],
               ["previsto", "A pagar / a receber"],
+              ["vencidas", `Vencidas${vencido.quantos ? ` (${vencido.quantos})` : ""}`],
             ] as const
           ).map(([key, label]) => (
             <Button
@@ -684,6 +792,12 @@ function CaixaPage() {
             </span>
           )}
         </div>
+        {view === "vencidas" && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Mostrando tudo que venceu e segue em aberto, de qualquer mês — o período acima não se
+            aplica a esta lista. Os cartões abaixo continuam sendo do período.
+          </p>
+        )}
       </div>
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
@@ -736,6 +850,15 @@ function CaixaPage() {
         )}
       </div>
 
+      <FieldFilter
+        fields={CAMPOS_CAIXA}
+        fieldKey={field}
+        onFieldChange={setField}
+        term={search}
+        onTermChange={setSearch}
+        placeholder="Buscar por descrição, cliente, categoria, conta…"
+      />
+
       <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
         <div className="panel overflow-x-auto">
           <table className="w-full text-sm">
@@ -762,7 +885,11 @@ function CaixaPage() {
               {!isLoading && rows.length === 0 && (
                 <tr>
                   <td colSpan={8} className="p-6 text-center text-muted-foreground">
-                    Nenhuma movimentação no período.
+                    {search
+                      ? "Nenhum lançamento bate com a busca."
+                      : view === "vencidas"
+                        ? "Nenhuma conta vencida em aberto."
+                        : "Nenhuma movimentação no período."}
                   </td>
                 </tr>
               )}
@@ -779,9 +906,7 @@ function CaixaPage() {
                     {/* De quem é a parcela. Sem isto a linha mostrava o valor e
                         deixava quem lê adivinhar de qual cliente veio. */}
                     {t.clients?.name && (
-                      <span className="block text-xs font-medium text-info">
-                        {t.clients.name}
-                      </span>
+                      <span className="block text-xs font-medium text-info">{t.clients.name}</span>
                     )}
                     {t.categories?.name && (
                       <span className="block text-xs text-muted-foreground">
@@ -895,30 +1020,88 @@ function CaixaPage() {
           </table>
         </div>
 
-        <div className="panel overflow-x-auto">
-          <div className="border-b border-border p-3">
-            <h2 className="font-display text-sm font-semibold">Saldo por conta</h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Só o que já foi pago — contas agendadas não mexem no saldo.
-            </p>
+        <div className="space-y-4">
+          <div className="panel overflow-x-auto">
+            <div className="border-b border-border p-3">
+              <h2 className="font-display text-sm font-semibold">Saldo por conta</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Só o que já foi pago — contas agendadas não mexem no saldo.
+              </p>
+            </div>
+            <table className="w-full text-sm">
+              <tbody>
+                {(data?.balances ?? []).map((b) => (
+                  <tr key={b.bank_account_id} className="border-b border-border/60 last:border-0">
+                    <td className="p-3">{b.name}</td>
+                    <td className="num p-3 text-right font-medium">{money(b.balance)}</td>
+                  </tr>
+                ))}
+                {(data?.balances.length ?? 0) === 0 && (
+                  <tr>
+                    <td className="p-6 text-center text-muted-foreground">
+                      Cadastre uma conta bancária para acompanhar os saldos.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
-          <table className="w-full text-sm">
-            <tbody>
-              {(data?.balances ?? []).map((b) => (
-                <tr key={b.bank_account_id} className="border-b border-border/60 last:border-0">
-                  <td className="p-3">{b.name}</td>
-                  <td className="num p-3 text-right font-medium">{money(b.balance)}</td>
-                </tr>
-              ))}
-              {(data?.balances.length ?? 0) === 0 && (
-                <tr>
-                  <td className="p-6 text-center text-muted-foreground">
-                    Cadastre uma conta bancária para acompanhar os saldos.
-                  </td>
-                </tr>
+
+          {/* Para onde foi o dinheiro. A categoria era lançada em toda despesa
+            e não aparecia somada em lugar nenhum. */}
+          <div className="panel">
+            <div className="border-b border-border p-3">
+              <h2 className="font-display text-sm font-semibold">Despesas por categoria</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Pagas no período, sem empréstimo. Clique numa categoria para ver os lançamentos.
+              </p>
+            </div>
+            <div className="space-y-3 p-3">
+              {porCategoria.lista.length === 0 && (
+                <p className="py-3 text-center text-sm text-muted-foreground">
+                  Nenhuma despesa paga no período.
+                </p>
               )}
-            </tbody>
-          </table>
+              {porCategoria.lista.map((c) => {
+                const parte = porCategoria.total > 0 ? (c.valor / porCategoria.total) * 100 : 0;
+                return (
+                  <button
+                    key={c.nome}
+                    type="button"
+                    className="block w-full text-left transition-opacity hover:opacity-80"
+                    onClick={() => {
+                      setView("pago");
+                      setKind("despesas");
+                      setField("categoria");
+                      setSearch(c.nome);
+                    }}
+                  >
+                    <span className="flex items-baseline justify-between gap-2 text-sm">
+                      <span className="truncate">{c.nome}</span>
+                      <span className="num shrink-0 font-medium">
+                        {money(c.valor)}
+                        <span className="ml-1 text-xs font-normal text-muted-foreground">
+                          {parte.toFixed(0)}%
+                        </span>
+                      </span>
+                    </span>
+                    <span className="mt-1 block h-1.5 rounded-full bg-muted">
+                      <span
+                        className="block h-1.5 rounded-full bg-primary"
+                        style={{ width: `${Math.max(parte, 1)}%` }}
+                      />
+                    </span>
+                  </button>
+                );
+              })}
+              {porCategoria.lista.length > 0 && (
+                <p className="flex justify-between border-t border-border pt-2 text-sm font-medium">
+                  <span>Total</span>
+                  <span className="num">{money(porCategoria.total)}</span>
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1109,10 +1292,7 @@ function CaixaPage() {
             <Button variant="outline" onClick={closeForm}>
               Cancelar
             </Button>
-            <Button
-              onClick={() => (editing ? update.mutate() : create.mutate())}
-              disabled={saving}
-            >
+            <Button onClick={() => (editing ? update.mutate() : create.mutate())} disabled={saving}>
               {saving ? "Salvando…" : "Salvar"}
             </Button>
           </DialogFooter>

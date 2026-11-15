@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { Tag, ReceivableStatusTag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ClienteLink } from "@/components/ClienteDetalhe";
+import { ClienteLink } from "@/components/ExtratoCliente";
 import { useAuth } from "@/hooks/useAuth";
 import {
   money,
@@ -71,11 +72,7 @@ export const Route = createFileRoute("/_authenticated/acordos")({
 
 type Step = 1 | 2 | 3 | 4;
 
-type DistributionMode =
-  | "proporcional"
-  | "escritorio_primeiro"
-  | "meio_a_meio"
-  | "manual";
+type DistributionMode = "proporcional" | "escritorio_primeiro" | "meio_a_meio" | "manual";
 
 /**
  * Uma parcela sendo editada no acordo pronto. Os campos de dinheiro e data são
@@ -235,7 +232,6 @@ function ajustarCentavos(rows: ScheduleRow[]): ScheduleRow[] {
     return { ...row, gross_amount: round2(parts) };
   });
 }
-
 
 /**
  * Bloco de parcelas que é inteiro do escritório, com datas próprias.
@@ -580,19 +576,35 @@ function AcordosPage() {
     queryKey: ["acordos"],
     queryFn: async () => {
       const [recv, clients, cases, inst] = await Promise.all([
-        supabase
-          .from("legal_receivables")
-          .select("*, clients(name), cases(case_number)")
-          .is("deleted_at", null)
-          .order("created_at", { ascending: false }),
-        supabase.from("clients").select("id, name").is("deleted_at", null).order("name"),
-        supabase
-          .from("cases")
-          .select("id, client_id, case_number, opposing_party")
-          .is("deleted_at", null),
-        supabase
-          .from("v_installments")
-          .select("receivable_id, gross_amount, paid_total, balance, due_date, status"),
+        todas(
+          supabase
+            .from("legal_receivables")
+            .select("*, clients(name), cases(case_number)")
+            .is("deleted_at", null)
+            .order("created_at", { ascending: false })
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("clients")
+            .select("id, name")
+            .is("deleted_at", null)
+            .order("name")
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("cases")
+            .select("id, client_id, case_number, opposing_party")
+            .is("deleted_at", null)
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("v_installments")
+            .select("receivable_id, gross_amount, paid_total, balance, due_date, status")
+            .order("id"),
+        ),
       ]);
       throwFirstError(recv, clients, cases, inst);
       return {
@@ -892,7 +904,9 @@ function AcordosPage() {
   function completarLinha(row: ScheduleRow, patch: Partial<ScheduleRow>): ScheduleRow {
     const atualizada = { ...row, ...patch };
     const mexeuEmDinheiro =
-      "gross_amount" in patch || "firm_amount" in patch || "client_amount" in patch ||
+      "gross_amount" in patch ||
+      "firm_amount" in patch ||
+      "client_amount" in patch ||
       "cost_reimbursement" in patch;
     if (!mexeuEmDinheiro) return atualizada;
 
@@ -1013,37 +1027,37 @@ function AcordosPage() {
       const { error } = await supabase.rpc(
         "create_agreement_with_schedule",
         dropUndefined({
-        _client_id: form.client_id,
-        _case_id: form.case_id || undefined,
-        _type: form.type,
-        _status: form.status,
-        _description: form.description.trim() || undefined,
-        _notes: form.notes.trim() || undefined,
-        _gross_amount: gross,
-        _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
-        _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
-        _fee_base_extra_amount: recebidoDireto,
-        _firm_direct_amount: firmDirectGravado,
-        _success_fee_amount: successFee,
-        _cost_reimbursement: costsGravado,
-        _expected_firm_amount: firmGravado,
-        _expected_client_amount: clientGravado,
-        _agreement_date: form.agreement_date || undefined,
-        _flow: form.flow,
-        _is_estimated: form.is_estimated,
-        _manual_override_reason: overridden ? form.override_reason.trim() : undefined,
-        _installments: gravar.map((s, index) => ({
-          label: s.label,
-          number: s.number,
-          total_count: gravar.length,
-          due_date: s.due_date,
-          stream: s.stream ?? "principal",
-          gross_amount: s.gross_amount,
-          fee_amount: firmComponents[index]?.fee_amount ?? 0,
-          success_fee_amount: firmComponents[index]?.success_fee_amount ?? 0,
-          client_amount: s.client_amount,
-          cost_reimbursement: s.cost_reimbursement,
-        })),
+          _client_id: form.client_id,
+          _case_id: form.case_id || undefined,
+          _type: form.type,
+          _status: form.status,
+          _description: form.description.trim() || undefined,
+          _notes: form.notes.trim() || undefined,
+          _gross_amount: gross,
+          _fee_percent: form.fee_percent ? num(Number(form.fee_percent)) : undefined,
+          _fee_fixed_amount: form.fee_fixed_amount ? num(Number(form.fee_fixed_amount)) : undefined,
+          _fee_base_extra_amount: recebidoDireto,
+          _firm_direct_amount: firmDirectGravado,
+          _success_fee_amount: successFee,
+          _cost_reimbursement: costsGravado,
+          _expected_firm_amount: firmGravado,
+          _expected_client_amount: clientGravado,
+          _agreement_date: form.agreement_date || undefined,
+          _flow: form.flow,
+          _is_estimated: form.is_estimated,
+          _manual_override_reason: overridden ? form.override_reason.trim() : undefined,
+          _installments: gravar.map((s, index) => ({
+            label: s.label,
+            number: s.number,
+            total_count: gravar.length,
+            due_date: s.due_date,
+            stream: s.stream ?? "principal",
+            gross_amount: s.gross_amount,
+            fee_amount: firmComponents[index]?.fee_amount ?? 0,
+            success_fee_amount: firmComponents[index]?.success_fee_amount ?? 0,
+            client_amount: s.client_amount,
+            cost_reimbursement: s.cost_reimbursement,
+          })),
         }),
       );
       if (error) throw error;
@@ -1068,14 +1082,17 @@ function AcordosPage() {
     queryKey: ["acordo-parcelas", editTarget?.id],
     enabled: !!editTarget,
     queryFn: async () => {
-      const { data: rows, error } = await supabase
-        .from("v_installments")
-        .select(
-          "id, label, number, due_date, gross_amount, fee_amount, success_fee_amount, client_amount, cost_reimbursement, paid_total, canceled_at, stream",
-        )
-        .eq("receivable_id", editTarget!.id)
-        .order("due_date", { ascending: true, nullsFirst: false })
-        .order("number", { ascending: true });
+      const { data: rows, error } = await todas(
+        supabase
+          .from("v_installments")
+          .select(
+            "id, label, number, due_date, gross_amount, fee_amount, success_fee_amount, client_amount, cost_reimbursement, paid_total, canceled_at, stream",
+          )
+          .eq("receivable_id", editTarget!.id)
+          .order("due_date", { ascending: true, nullsFirst: false })
+          .order("number", { ascending: true })
+          .order("id"),
+      );
       if (error) throw error;
       return (rows ?? []) as unknown as {
         id: string;
@@ -1144,11 +1161,7 @@ function AcordosPage() {
     let completo = patch;
     if ("client_amount" in patch) {
       completo = { ...patch, gross_amount: String(round2(firm + client + costs)) };
-    } else if (
-      "gross_amount" in patch ||
-      "firm_amount" in patch ||
-      "cost_reimbursement" in patch
-    ) {
+    } else if ("gross_amount" in patch || "firm_amount" in patch || "cost_reimbursement" in patch) {
       const total = num(Number(atualizada.gross_amount));
       completo = {
         ...patch,
@@ -1350,8 +1363,7 @@ function AcordosPage() {
       ].filter(Boolean);
       const caixa = num(r?.recebido) + num(r?.repassado);
       toast.success(`Acordo apagado com ${partes.join(", ")}.`, {
-        description:
-          caixa > 0.01 ? `${money(caixa)} saíram do fluxo de caixa junto.` : undefined,
+        description: caixa > 0.01 ? `${money(caixa)} saíram do fluxo de caixa junto.` : undefined,
       });
       setDeleteTarget(null);
       void qc.invalidateQueries();
@@ -1595,9 +1607,9 @@ function AcordosPage() {
                         onChange={(e) => updateForm({ success_fee_amount: e.target.value })}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Sempre por fora: não entra no valor bruto nem na base do percentual. Soma
-                        no total do escritório e ganha cronograma próprio, com as datas em que a
-                        parte contrária vai pagar.
+                        Sempre por fora: não entra no valor bruto nem na base do percentual. Soma no
+                        total do escritório e ganha cronograma próprio, com as datas em que a parte
+                        contrária vai pagar.
                       </p>
                     </div>
                     <div className={`space-y-2 ${isServiceFee ? "hidden" : ""}`}>
@@ -1804,7 +1816,9 @@ function AcordosPage() {
                             </p>
                             <p className="mt-1 text-muted-foreground">
                               O cronograma abaixo cobra só os{" "}
-                              <strong className="num text-foreground">{money(mainFirm + costs)}</strong>{" "}
+                              <strong className="num text-foreground">
+                                {money(mainFirm + costs)}
+                              </strong>{" "}
                               que ela deve repassar ao escritório. Os{" "}
                               <strong className="num text-foreground">{money(client)}</strong> que
                               ficam com ela não viram parcela a receber, porque nunca passam pela
@@ -1849,10 +1863,10 @@ function AcordosPage() {
                               </p>
                               {firmDirect > 0 && (
                                 <p className="text-xs text-info">
-                                  Empresa paga{" "}
-                                  <strong className="num">{money(firmDirect)}</strong> e a cliente
-                                  paga <strong className="num">{money(firmNoPrincipal)}</strong> —
-                                  em trilhas separadas, cada uma com suas datas. A cliente recebe{" "}
+                                  Empresa paga <strong className="num">{money(firmDirect)}</strong>{" "}
+                                  e a cliente paga{" "}
+                                  <strong className="num">{money(firmNoPrincipal)}</strong> — em
+                                  trilhas separadas, cada uma com suas datas. A cliente recebe{" "}
                                   <strong className="num">{money(client)}</strong> direto na conta
                                   dela.
                                 </p>
@@ -1992,8 +2006,8 @@ function AcordosPage() {
                         <p className="mb-3 border-b border-border pb-3 text-xs text-muted-foreground">
                           Desse bruto, a cliente já sacou{" "}
                           <strong className="num text-foreground">{money(recebidoDireto)}</strong>{" "}
-                          direto. Os honorários continuam calculados sobre o bruto inteiro, mas
-                          esse valor não entra no cronograma, no caixa nem no repasse.
+                          direto. Os honorários continuam calculados sobre o bruto inteiro, mas esse
+                          valor não entra no cronograma, no caixa nem no repasse.
                         </p>
                       )}
                       <div className="grid gap-2 sm:grid-cols-2">
@@ -2068,8 +2082,8 @@ function AcordosPage() {
                               <th className="p-2 text-left">Identificação</th>
                               <th className="text-left">Vencimento</th>
                               <th className="text-right">Total</th>
-                              <th className="text-right">Escritório</th>
-                              <th className="text-right">Cliente</th>
+                              <th className="text-right">Parte do escritório</th>
+                              <th className="text-right">Parte da cliente</th>
                               <th className="p-2 text-right">Reembolso</th>
                             </tr>
                           </thead>
@@ -2241,9 +2255,7 @@ function AcordosPage() {
             <SelectItem value="valor_asc">Valor (menor primeiro)</SelectItem>
           </SelectContent>
         </Select>
-        <span className="text-xs text-muted-foreground">
-          {sortedReceivables.length} acordo(s)
-        </span>
+        <span className="text-xs text-muted-foreground">{sortedReceivables.length} acordo(s)</span>
       </div>
 
       <div className="panel overflow-x-auto">
@@ -2255,8 +2267,8 @@ function AcordosPage() {
               <th>Situação</th>
               <th className="text-right">Bruto</th>
               <th className="text-right">Total a receber</th>
-              <th className="text-right">Escritório</th>
-              <th className="text-right">Cliente</th>
+              <th className="text-right">Parte do escritório</th>
+              <th className="text-right">Parte da cliente</th>
               <th className="text-right">Recebido</th>
               {(canCancel || canEdit || canDelete || isMainAdmin) && <th className="p-3" />}
             </tr>
@@ -2332,8 +2344,8 @@ function AcordosPage() {
                   <td className="num text-right">{money(r.expected_firm_amount)}</td>
                   <td className="num text-right">{money(r.expected_client_amount)}</td>
                   <td className="num text-right">{money(paid)}</td>
-                   {(canCancel || canEdit || canDelete || isMainAdmin) && (
-                     <td className="p-3 text-right whitespace-nowrap">
+                  {(canCancel || canEdit || canDelete || isMainAdmin) && (
+                    <td className="p-3 text-right whitespace-nowrap">
                       {canEdit && r.status !== "cancelado" && (
                         <Button
                           size="sm"
@@ -2378,7 +2390,7 @@ function AcordosPage() {
                           Editar
                         </Button>
                       )}
-                       {canCancel && r.status !== "cancelado" && paid <= 0.01 && (
+                      {canCancel && r.status !== "cancelado" && paid <= 0.01 && (
                         <Button
                           size="sm"
                           variant="ghost"
@@ -2391,27 +2403,27 @@ function AcordosPage() {
                             setCancelReason("");
                           }}
                         >
-                           Cancelar
-                         </Button>
-                       )}
-                       {(canDelete || isMainAdmin) && (
-                         <Button
-                           size="sm"
-                           variant="ghost"
-                           className="text-destructive"
-                           onClick={() =>
-                             setDeleteTarget({
-                               id: r.id,
-                               name: (r.clients as { name: string } | null)?.name ?? "acordo",
-                               paid,
-                             })
-                           }
-                         >
-                           Apagar
-                         </Button>
-                       )}
-                     </td>
-                   )}
+                          Cancelar
+                        </Button>
+                      )}
+                      {(canDelete || isMainAdmin) && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={() =>
+                            setDeleteTarget({
+                              id: r.id,
+                              name: (r.clients as { name: string } | null)?.name ?? "acordo",
+                              paid,
+                            })
+                          }
+                        >
+                          Apagar
+                        </Button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -2565,9 +2577,7 @@ function AcordosPage() {
                 type="number"
                 step="0.01"
                 value={editForm.expected_firm_amount}
-                onChange={(e) =>
-                  setEditForm({ ...editForm, expected_firm_amount: e.target.value })
-                }
+                onChange={(e) => setEditForm({ ...editForm, expected_firm_amount: e.target.value })}
               />
             </div>
             <div className="space-y-2">
@@ -2658,12 +2668,9 @@ function AcordosPage() {
                 <h3 className="text-sm font-medium">Cronograma de parcelas</h3>
                 <p className="text-xs text-muted-foreground">
                   Somam{" "}
-                  <strong className="num text-foreground">
-                    {money(totaisDoCronograma.gross)}
-                  </strong>{" "}
+                  <strong className="num text-foreground">{money(totaisDoCronograma.gross)}</strong>{" "}
                   — escritório {money(totaisDoCronograma.firm)}, cliente{" "}
-                  {money(totaisDoCronograma.client)}, reembolso{" "}
-                  {money(totaisDoCronograma.costs)}
+                  {money(totaisDoCronograma.client)}, reembolso {money(totaisDoCronograma.costs)}
                 </p>
               </div>
 
@@ -2681,9 +2688,7 @@ function AcordosPage() {
               )}
 
               {!parcelasLoading && !parcelasError && editSchedule.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  Este acordo ainda não tem parcelas.
-                </p>
+                <p className="text-xs text-muted-foreground">Este acordo ainda não tem parcelas.</p>
               )}
 
               {temParcelaPaga && (
@@ -2696,10 +2701,9 @@ function AcordosPage() {
                     <span>
                       Alterar também as parcelas que já receberam pagamento
                       <span className="mt-0.5 block text-xs text-muted-foreground">
-                        Elas são histórico: mexer nelas muda relatórios já fechados. Sem marcar,
-                        só as parcelas em aberto ficam editáveis. O valor de uma parcela nunca
-                        pode ficar abaixo do que já entrou nela — para isso, estorne o
-                        recebimento antes.
+                        Elas são histórico: mexer nelas muda relatórios já fechados. Sem marcar, só
+                        as parcelas em aberto ficam editáveis. O valor de uma parcela nunca pode
+                        ficar abaixo do que já entrou nela — para isso, estorne o recebimento antes.
                       </span>
                     </span>
                   </label>
@@ -2725,8 +2729,8 @@ function AcordosPage() {
                         <th className="p-2 text-left">Identificação</th>
                         <th className="text-left">Vencimento</th>
                         <th className="text-right">Total</th>
-                        <th className="text-right">Escritório</th>
-                        <th className="text-right">Cliente</th>
+                        <th className="text-right">Parte do escritório</th>
+                        <th className="text-right">Parte da cliente</th>
                         <th className="p-2 text-right">Reembolso</th>
                       </tr>
                     </thead>
@@ -2848,8 +2852,8 @@ function AcordosPage() {
                         A diferença é justamente o que a cliente recebeu direto (
                         {money(recebidoDiretoNaEdicao)}). Se estas parcelas foram criadas antes
                         desse campo, elas ainda cobram dela um dinheiro que já está na conta dela:
-                        baixe a parte da cliente nas parcelas, ou zere o campo se ele não se
-                        aplica a este acordo.
+                        baixe a parte da cliente nas parcelas, ou zere o campo se ele não se aplica
+                        a este acordo.
                       </p>
                     )}
                   <p className="text-muted-foreground">
@@ -2875,15 +2879,15 @@ function AcordosPage() {
                         totaisDoCronograma.costs,
                     ),
                   )}{" "}
-                  e os totais somam {money(totaisDoCronograma.gross)}. Basta mexer na parcela
-                  torta que ela se fecha sozinha.
+                  e os totais somam {money(totaisDoCronograma.gross)}. Basta mexer na parcela torta
+                  que ela se fecha sozinha.
                 </p>
               )}
 
               <p className="text-xs text-muted-foreground">
-                A coluna Escritório junta honorários e sucumbência. Mexendo no total, no
-                escritório ou no reembolso, a parte da cliente se ajusta sozinha; mexendo na parte
-                da cliente, é o total que muda — assim a parcela sempre fecha.
+                A coluna Escritório junta honorários e sucumbência. Mexendo no total, no escritório
+                ou no reembolso, a parte da cliente se ajusta sozinha; mexendo na parte da cliente,
+                é o total que muda — assim a parcela sempre fecha.
               </p>
             </div>
           </div>
@@ -2899,10 +2903,7 @@ function AcordosPage() {
             >
               Cancelar
             </Button>
-            <Button
-              onClick={() => updateReceivable.mutate()}
-              disabled={updateReceivable.isPending}
-            >
+            <Button onClick={() => updateReceivable.mutate()} disabled={updateReceivable.isPending}>
               {updateReceivable.isPending ? "Salvando…" : "Salvar"}
             </Button>
           </DialogFooter>
@@ -2954,14 +2955,13 @@ function AcordosPage() {
                 {(deleteTarget?.paid ?? 0) > 0.01 && (
                   <p className="rounded-md border border-destructive/40 bg-destructive/5 p-2 font-medium text-destructive">
                     Atenção: este acordo já recebeu{" "}
-                    <span className="num">{money(deleteTarget?.paid ?? 0)}</span>. Esse dinheiro
-                    sai do Fluxo de Caixa junto, e o saldo das contas muda na hora — inclusive de
-                    meses já fechados.
+                    <span className="num">{money(deleteTarget?.paid ?? 0)}</span>. Esse dinheiro sai
+                    do Fluxo de Caixa junto, e o saldo das contas muda na hora — inclusive de meses
+                    já fechados.
                   </p>
                 )}
                 <p>
-                  Não dá para desfazer. Fica o registro completo na auditoria, com todos os
-                  valores.
+                  Não dá para desfazer. Fica o registro completo na auditoria, com todos os valores.
                 </p>
               </div>
             </DialogDescription>

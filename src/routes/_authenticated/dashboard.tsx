@@ -15,6 +15,7 @@ import {
   YAxis,
 } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -82,37 +83,71 @@ function useDashboardData() {
   return useQuery({
     queryKey: ["dashboard"],
     queryFn: async () => {
-      const [inst, balances, banks, txs, receivables, allCases, clients, receipts] =
+      const [inst, balances, banks, txs, receivables, allCases, clients, receipts, vencidas] =
         await Promise.all([
-          supabase.from("v_installments").select("*"),
-          supabase.from("v_client_balances").select("*"),
+          todas(supabase.from("v_installments").select("*").order("id")),
+          todas(supabase.from("v_client_balances").select("*").order("client_id")),
           supabase.from("v_bank_balances").select("*"),
-          supabase
-            .from("financial_transactions")
-            .select("id, type, amount, paid_on, status, description, is_financing, source_type")
-            .eq("status", "pago"),
-          supabase
-            .from("legal_receivables")
-            .select(
-              "id, status, type, is_estimated, expected_firm_amount, gross_amount, description, client_id, case_id",
-            )
-            .is("deleted_at", null),
+          todas(
+            supabase
+              .from("financial_transactions")
+              .select("id, type, amount, paid_on, status, description, is_financing, source_type")
+              .eq("status", "pago")
+              .order("id"),
+          ),
+          todas(
+            supabase
+              .from("legal_receivables")
+              .select(
+                "id, status, type, is_estimated, expected_firm_amount, gross_amount, description, client_id, case_id",
+              )
+              .is("deleted_at", null)
+              .order("id"),
+          ),
           // Os processos vêm inteiros (e não só contados) porque é neles que
           // está a área do direito — é ela que separa trabalhista de cível nas
           // métricas por cliente.
-          supabase.from("cases").select("id, practice_area, status").is("deleted_at", null),
-          supabase.from("clients").select("id, name").is("deleted_at", null),
+          todas(
+            supabase
+              .from("cases")
+              .select("id, practice_area, status")
+              .is("deleted_at", null)
+              .order("id"),
+          ),
+          todas(supabase.from("clients").select("id, name").is("deleted_at", null).order("id")),
           // O dinheiro de terceiros precisa vir do recebimento, não da parcela:
           // a parcela só sabe quanto é da cliente, não se passou pela conta do
           // escritório ou se ela recebeu direto da empresa.
-          supabase
-            .from("receipts")
-            .select(
-              "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
-            )
-            .is("reversed_at", null),
+          todas(
+            supabase
+              .from("receipts")
+              .select(
+                "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
+              )
+              .is("reversed_at", null)
+              .order("id"),
+          ),
+          // Lançamento previsto com vencimento já passado: vira alerta.
+          todas(
+            supabase
+              .from("financial_transactions")
+              .select("type, amount")
+              .eq("status", "previsto")
+              .lt("due_date", todayISO())
+              .order("id"),
+          ),
         ]);
-      throwFirstError(inst, balances, banks, txs, receivables, allCases, clients, receipts);
+      throwFirstError(
+        inst,
+        balances,
+        banks,
+        txs,
+        receivables,
+        allCases,
+        clients,
+        receipts,
+        vencidas,
+      );
       return {
         installments: (inst.data ?? []) as unknown as InstallmentRow[],
         balances: balances.data ?? [],
@@ -126,6 +161,7 @@ function useDashboardData() {
         }[],
         clients: (clients.data ?? []) as { id: string; name: string }[],
         receipts: receipts.data ?? [],
+        overdue: (vencidas.data ?? []) as { type: string; amount: number }[],
       };
     },
   });
@@ -142,20 +178,26 @@ function usePeriodData(start: string, end: string) {
       const [receipts, txs] = await Promise.all([
         // O cliente vem junto (recebimento → parcela → acordo) para dar a
         // contagem de clientes que efetivamente pagaram algo no período.
-        supabase
-          .from("receipts")
-          .select(
-            "fee_amount, success_fee_amount, cost_reimbursement, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id, case_id))",
-          )
-          .is("reversed_at", null)
-          .gte("received_on", start)
-          .lte("received_on", end),
-        supabase
-          .from("financial_transactions")
-          .select("type, amount, paid_on, is_financing, source_type")
-          .eq("status", "pago")
-          .gte("paid_on", start)
-          .lte("paid_on", end),
+        todas(
+          supabase
+            .from("receipts")
+            .select(
+              "fee_amount, success_fee_amount, cost_reimbursement, client_amount_received_by_firm, received_on, installments!inner(legal_receivables!inner(client_id, case_id))",
+            )
+            .is("reversed_at", null)
+            .gte("received_on", start)
+            .lte("received_on", end)
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("financial_transactions")
+            .select("type, amount, paid_on, is_financing, source_type")
+            .eq("status", "pago")
+            .gte("paid_on", start)
+            .lte("paid_on", end)
+            .order("id"),
+        ),
       ]);
       if (receipts.error) throw receipts.error;
       if (txs.error) throw txs.error;
@@ -174,14 +216,17 @@ function useMixData(start: string, end: string) {
   return useQuery({
     queryKey: ["dashboard-mix", start, end],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("receipts")
-        .select(
-          "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
-        )
-        .is("reversed_at", null)
-        .gte("received_on", start)
-        .lte("received_on", end);
+      const { data, error } = await todas(
+        supabase
+          .from("receipts")
+          .select(
+            "fee_amount, success_fee_amount, client_amount_received_by_firm, client_amount_received_direct",
+          )
+          .is("reversed_at", null)
+          .gte("received_on", start)
+          .lte("received_on", end)
+          .order("id"),
+      );
       if (error) throw error;
       return data ?? [];
     },
@@ -211,17 +256,23 @@ function useHonorariosData(start: string, end: string) {
     queryKey: ["dashboard-honorarios", start, end],
     queryFn: async () => {
       const [recebidos, aReceber] = await Promise.all([
-        supabase
-          .from("receipts")
-          .select("fee_amount, success_fee_amount, received_on")
-          .is("reversed_at", null)
-          .gte("received_on", start)
-          .lte("received_on", end),
-        supabase
-          .from("v_installments")
-          .select("due_date, fee_amount, success_fee_amount, paid_fee, paid_success_fee, status")
-          .gte("due_date", start)
-          .lte("due_date", end),
+        todas(
+          supabase
+            .from("receipts")
+            .select("fee_amount, success_fee_amount, received_on")
+            .is("reversed_at", null)
+            .gte("received_on", start)
+            .lte("received_on", end)
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("v_installments")
+            .select("due_date, fee_amount, success_fee_amount, paid_fee, paid_success_fee, status")
+            .gte("due_date", start)
+            .lte("due_date", end)
+            .order("id"),
+        ),
       ]);
       throwFirstError(recebidos, aReceber);
       return {
@@ -255,6 +306,9 @@ function normalizarArea(texto: string | null | undefined): string | null {
 function rotuloArea(valor: string): string {
   return valor.charAt(0).toUpperCase() + valor.slice(1);
 }
+
+/** Blocos que dependem dos lançamentos do Fluxo de Caixa. */
+const SO_COM_CAIXA = new Set(["periodo", "saldo", "despesas", "resultado"]);
 
 /** O escritório é de trabalhista: é a área que abre marcada. */
 const AREA_PADRAO = "trabalhista";
@@ -317,8 +371,12 @@ function Dashboard() {
   const { data, isLoading, error } = useDashboardData();
   const today = todayISO();
   // Cada pessoa esconde o que não usa, em Configurações.
-  const { profile } = useAuth();
-  const { mostrar } = useDashboardPrefs(profile?.id);
+  const { profile, can } = useAuth();
+  const prefs = useDashboardPrefs(profile?.id);
+  // Quem não pode ver o caixa não recebe esses dados do banco. Mostrar os
+  // blocos zerados faria "R$ 0,00" parecer um fato, e não falta de acesso.
+  const veCaixa = can("caixa", "view");
+  const mostrar = (chave: string) => prefs.mostrar(chave) && (veCaixa || !SO_COM_CAIXA.has(chave));
 
   // Área do direito das métricas por cliente. Fica guardada no navegador para
   // não ter que reescolher a área toda vez que abrir o dashboard.
@@ -459,11 +517,6 @@ function Dashboard() {
   const nomePorCliente = new Map((d.clients ?? []).map((c) => [c.id, c.name]));
   const nomeDoCliente = (id: string | null | undefined) => (id && nomePorCliente.get(id)) || "—";
 
-  // O escritório é de trabalhista: o cível é a exceção, e são pouquíssimos
-  // casos. Por isso a regra é pela negativa — trabalhista é tudo que não está
-  // marcado como cível, inclusive acordo sem processo vinculado ou com a área
-  // em branco. Assim ninguém precisa marcar nada no caso comum, e um processo
-  // novo entra certo por padrão.
   // As áreas que realmente existem nos processos, para o filtro não depender
   // de uma lista fixa no código. Antes ele procurava "cível" e, como nenhum
   // processo é cível, escolher "Trabalhista" não mudava número nenhum: o
@@ -705,12 +758,26 @@ function Dashboard() {
     "var(--color-chart-5)",
   ];
 
+  /** Algum bloco do grupo está à vista? Grupo todo escondido não mostra o título. */
+  const algum = (chaves: string[]) => chaves.some((k) => mostrar(k));
+
   const alerts: { text: string; to: DashboardLink; search?: { filtro?: string } }[] = [];
   if (late.length)
     alerts.push({
       text: `${late.length} parcela(s) atrasada(s), somando ${money(sumBalance(late))}`,
       to: "/parcelas",
       search: { filtro: "ATRASADA" },
+    });
+  // Conta do caixa que venceu e ninguém deu baixa. Só aparecia para quem
+  // voltasse, no Fluxo de Caixa, ao mês em que ela vencia.
+  const vencidasNoCaixa = d.overdue ?? [];
+  if (vencidasNoCaixa.length)
+    alerts.push({
+      text: `${vencidasNoCaixa.length} lançamento(s) do caixa vencido(s) e em aberto, somando ${money(
+        vencidasNoCaixa.reduce((s, t) => s + num(t.amount), 0),
+      )}`,
+      to: "/caixa",
+      search: { filtro: "vencidas" },
     });
   if (pendingTransfer > 0.01)
     alerts.push({
@@ -734,6 +801,26 @@ function Dashboard() {
         title="Dashboard"
         description="Visão consolidada do caixa, dos recebíveis e dos valores de clientes."
       />
+
+      {/* O que pede ação vem primeiro. */}
+      {mostrar("alertas") && alerts.length > 0 && (
+        <div className="panel mb-6 p-4">
+          <h2 className="font-display text-sm font-semibold">Alertas</h2>
+          <ul className="mt-3 space-y-2">
+            {alerts.map((a) => (
+              <li key={a.text}>
+                <Link
+                  to={a.to}
+                  {...(a.search ? { search: a.search } : {})}
+                  className="text-sm text-foreground underline-offset-4 hover:underline"
+                >
+                  {a.text}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {mostrar("periodo") && (
         <div className="panel mb-6 p-4">
@@ -996,134 +1083,143 @@ function Dashboard() {
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {/* Parte do saldo é dinheiro de cliente que ainda não foi repassado.
+      {algum([
+        "saldo",
+        "aguardando",
+        "confirmados",
+        "estimados",
+        "atrasadas",
+        "vence7",
+        "vence30",
+      ]) && (
+        <>
+          <h2 className="mb-2 font-display text-sm font-semibold">Posição de hoje</h2>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {/* Parte do saldo é dinheiro de cliente que ainda não foi repassado.
             Sem este aviso, quem abre o dashboard lê o saldo como se fosse
             todo do escritório. */}
-        {mostrar("saldo") && (
-          <Card
-            label="Saldo em contas"
-            value={money(totalBank)}
-            hint={
-              pendingTransfer > 0.01
-                ? `Inclui ${money(pendingTransfer)} de clientes ainda não repassados`
-                : "Nenhum repasse pendente"
-            }
-            tone={pendingTransfer > 0.01 ? "warning" : "default"}
-            to="/caixa"
-          />
-        )}
-        {mostrar("receita") && (
-          <Card
-            label="Receita realizada do escritório"
-            value={money(firmRevenue)}
-            hint="Honorários + sucumbência recebidos"
-            tone="success"
-          />
-        )}
-        {mostrar("despesas") && (
-          <Card
-            label="Despesas pagas"
-            value={money(expenses)}
-            hint="Sem as parcelas de empréstimo"
-            to="/caixa"
-          />
-        )}
-        {mostrar("resultado") && (
-          <Card
-            label="Resultado de caixa"
-            value={money(firmRevenue - expenses)}
-            tone={firmRevenue - expenses >= 0 ? "success" : "danger"}
-          />
-        )}
-        {mostrar("aguardando") && (
-          <Card
-            label="Aguardando repasse"
-            value={money(pendingTransfer)}
-            hint="Dinheiro de clientes — não é receita"
-            to="/repasses"
-          />
-        )}
-        {mostrar("repassado") && (
-          <Card label="Já repassado" value={money(transferred)} to="/repasses" />
-        )}
-        {mostrar("confirmados") && (
-          <Card
-            label="Recebíveis confirmados"
-            value={money(openFirmExpected)}
-            hint="Parte do escritório em aberto"
-            to="/parcelas"
-          />
-        )}
-        {mostrar("estimados") && (
-          <Card
-            label="Recebíveis estimados"
-            value={money(estimated)}
-            hint="A confirmar — fora do caixa"
-            to="/acordos"
-          />
-        )}
-        {/* Estes três mostram o valor cheio da parcela, que é o que se cobra
+            {mostrar("saldo") && (
+              <Card
+                label="Saldo em contas"
+                value={money(totalBank)}
+                hint={
+                  pendingTransfer > 0.01
+                    ? `Inclui ${money(pendingTransfer)} de clientes ainda não repassados`
+                    : "Nenhum repasse pendente"
+                }
+                tone={pendingTransfer > 0.01 ? "warning" : "default"}
+                to="/caixa"
+              />
+            )}
+            {mostrar("aguardando") && (
+              <Card
+                label="Aguardando repasse"
+                value={money(pendingTransfer)}
+                hint="Dinheiro de clientes — não é receita"
+                to="/repasses"
+              />
+            )}
+            {mostrar("confirmados") && (
+              <Card
+                label="Recebíveis confirmados"
+                value={money(openFirmExpected)}
+                hint="Parte do escritório em aberto"
+                to="/parcelas"
+              />
+            )}
+            {mostrar("estimados") && (
+              <Card
+                label="Recebíveis estimados"
+                value={money(estimated)}
+                hint="A confirmar — fora do caixa"
+                to="/acordos"
+              />
+            )}
+            {/* Estes três mostram o valor cheio da parcela, que é o que se cobra
             da cliente. Os cards de recebíveis mostram só a parte do escritório
             — por isso o aviso, para ninguém somar um com o outro. */}
-        {mostrar("atrasadas") && (
-          <Card
-            label="Parcelas atrasadas"
-            value={`${late.length} · ${money(sumBalance(late))}`}
-            hint="Valor cheio do acordo — cliente + escritório"
-            tone={late.length ? "danger" : "default"}
-            to="/parcelas"
-            search={{ filtro: "ATRASADA" }}
-          />
-        )}
-        {mostrar("vence7") && (
-          <Card
-            label="Vencem em 7 dias"
-            value={money(sumBalance(next7))}
-            hint="Valor cheio do acordo — cliente + escritório"
-            to="/parcelas"
-            search={{ filtro: "VENCE_7" }}
-          />
-        )}
-        {mostrar("vence30") && (
-          <Card
-            label="Vencem em 30 dias"
-            value={money(sumBalance(next30))}
-            hint="Valor cheio do acordo — cliente + escritório"
-            to="/parcelas"
-            search={{ filtro: "VENCE_30" }}
-          />
-        )}
-        {mostrar("terceiros") && (
-          <Card
-            label="Terceiros recebidos"
-            value={money(thirdPartyReceived)}
-            hint={
-              thirdPartyDirect > 0.01
-                ? `Passaram pelo caixa — outros ${money(thirdPartyDirect)} foram direto às clientes`
-                : "Valores de clientes que passaram pelo caixa"
-            }
-          />
-        )}
-      </div>
+            {mostrar("atrasadas") && (
+              <Card
+                label="Parcelas atrasadas"
+                value={`${late.length} · ${money(sumBalance(late))}`}
+                hint="Valor cheio do acordo — cliente + escritório"
+                tone={late.length ? "danger" : "default"}
+                to="/parcelas"
+                search={{ filtro: "ATRASADA" }}
+              />
+            )}
+            {mostrar("vence7") && (
+              <Card
+                label="Vencem em 7 dias"
+                value={money(sumBalance(next7))}
+                hint="Valor cheio do acordo — cliente + escritório"
+                to="/parcelas"
+                search={{ filtro: "VENCE_7" }}
+              />
+            )}
+            {mostrar("vence30") && (
+              <Card
+                label="Vencem em 30 dias"
+                value={money(sumBalance(next30))}
+                hint="Valor cheio do acordo — cliente + escritório"
+                to="/parcelas"
+                search={{ filtro: "VENCE_30" }}
+              />
+            )}
+          </div>
+        </>
+      )}
 
-      {mostrar("alertas") && alerts.length > 0 && (
-        <div className="panel mt-6 p-4">
-          <h2 className="font-display text-sm font-semibold">Alertas</h2>
-          <ul className="mt-3 space-y-2">
-            {alerts.map((a) => (
-              <li key={a.text}>
-                <Link
-                  to={a.to}
-                  {...(a.search ? { search: a.search } : {})}
-                  className="text-sm text-foreground underline-offset-4 hover:underline"
-                >
-                  {a.text}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {/* Estes somam tudo que já foi lançado. Ficavam misturados com os de
+          cima, logo abaixo de um filtro de data que não vale para eles. */}
+      {algum(["receita", "despesas", "resultado", "repassado", "terceiros"]) && (
+        <>
+          <h2 className="mt-6 font-display text-sm font-semibold">Acumulado desde o início</h2>
+          <p className="mb-2 text-xs text-muted-foreground">
+            Soma de tudo que já foi lançado no sistema — o filtro de período não vale para estes
+            números.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {mostrar("receita") && (
+              <Card
+                label="Receita realizada do escritório"
+                value={money(firmRevenue)}
+                hint="Honorários + sucumbência, desde o início"
+                tone="success"
+              />
+            )}
+            {mostrar("despesas") && (
+              <Card
+                label="Despesas pagas"
+                value={money(expenses)}
+                hint="Desde o início, sem parcelas de empréstimo"
+                to="/caixa"
+              />
+            )}
+            {mostrar("resultado") && (
+              <Card
+                label="Resultado da operação"
+                hint="Honorários menos despesas, desde o início"
+                value={money(firmRevenue - expenses)}
+                tone={firmRevenue - expenses >= 0 ? "success" : "danger"}
+              />
+            )}
+            {mostrar("repassado") && (
+              <Card label="Já repassado" value={money(transferred)} to="/repasses" />
+            )}
+            {mostrar("terceiros") && (
+              <Card
+                label="Terceiros recebidos"
+                value={money(thirdPartyReceived)}
+                hint={
+                  thirdPartyDirect > 0.01
+                    ? `Passaram pelo caixa — outros ${money(thirdPartyDirect)} foram direto às clientes`
+                    : "Valores de clientes que passaram pelo caixa"
+                }
+              />
+            )}
+          </div>
+        </>
       )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
@@ -1184,6 +1280,7 @@ function Dashboard() {
                 customEnd={mixEnd}
                 onCustomStartChange={setMixStart}
                 onCustomEndChange={setMixEnd}
+                compacto
               />
             </div>
             <div className="mt-4 h-64">
@@ -1233,6 +1330,7 @@ function Dashboard() {
                 customEnd={honEnd}
                 onCustomStartChange={setHonStart}
                 onCustomEndChange={setHonEnd}
+                compacto
               />
             </div>
             <div className="mt-4 h-64">

@@ -2,8 +2,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { BotaoAdvbox } from "@/components/BotaoAdvbox";
+import { ClienteLink } from "@/components/ExtratoCliente";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -200,13 +202,18 @@ function ClientesPage() {
     queryKey: ["clientes"],
     queryFn: async () => {
       const [clients, balances, paymentAccounts] = await Promise.all([
-        supabase.from("clients").select("*").is("deleted_at", null).order("name"),
-        supabase.from("v_client_balances").select("*"),
-        supabase
-          .from("client_payment_accounts")
-          .select(
-            "client_id, pix_key_type, pix_key, bank, branch, account, holder_name, holder_tax_id",
-          ),
+        todas(
+          supabase.from("clients").select("*").is("deleted_at", null).order("name").order("id"),
+        ),
+        todas(supabase.from("v_client_balances").select("*").order("client_id")),
+        todas(
+          supabase
+            .from("client_payment_accounts")
+            .select(
+              "client_id, pix_key_type, pix_key, bank, branch, account, holder_name, holder_tax_id",
+            )
+            .order("id"),
+        ),
       ]);
       throwFirstError(clients, balances, paymentAccounts);
       return {
@@ -722,7 +729,9 @@ function ClientesPage() {
               return (
                 <tr key={c.id} className="border-b border-border/60 last:border-0">
                   <td className="p-3 font-medium">
-                    {c.name}
+                    {/* O extrato dela abre daqui também — era a única tela de
+                        onde não dava para chegar nele. */}
+                    <ClienteLink clientId={c.id} name={c.name} />
                     {(c.payer_names ?? []).length > 0 && (
                       <span className="block text-xs font-normal text-muted-foreground">
                         Também paga: {(c.payer_names ?? []).join(", ")}

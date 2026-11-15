@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { BotaoAdvbox } from "@/components/BotaoAdvbox";
 import { Button } from "@/components/ui/button";
@@ -56,6 +57,8 @@ type CaseRow = {
   action_type: string | null;
   responsible_lawyer: string | null;
   notes: string | null;
+  judicial_phase: string | null;
+  stage: string | null;
   clients: { name: string } | null;
   [column: string]: unknown;
 };
@@ -138,12 +141,22 @@ function ProcessosPage() {
     queryKey: ["processos"],
     queryFn: async () => {
       const [cases, clients] = await Promise.all([
-        supabase
-          .from("cases")
-          .select("*, clients(name)")
-          .is("deleted_at", null)
-          .order("created_at", { ascending: false }),
-        supabase.from("clients").select("id, name").is("deleted_at", null).order("name"),
+        todas(
+          supabase
+            .from("cases")
+            .select("*, clients(name)")
+            .is("deleted_at", null)
+            .order("created_at", { ascending: false })
+            .order("id"),
+        ),
+        todas(
+          supabase
+            .from("clients")
+            .select("id, name")
+            .is("deleted_at", null)
+            .order("name")
+            .order("id"),
+        ),
       ]);
       throwFirstError(cases, clients);
       return { cases: cases.data ?? [], clients: clients.data ?? [] };
@@ -397,6 +410,7 @@ function ProcessosPage() {
               <th>Nº do processo</th>
               <th>Parte contrária</th>
               <th>Área</th>
+              <th>Fase / etapa</th>
               <th>Responsável</th>
               {canWrite && <th className="p-3" />}
             </tr>
@@ -404,14 +418,14 @@ function ProcessosPage() {
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={6} className="p-6 text-center text-muted-foreground">
+                <td colSpan={7} className="p-6 text-center text-muted-foreground">
                   Carregando…
                 </td>
               </tr>
             )}
             {!isLoading && rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-6 text-center text-muted-foreground">
+                <td colSpan={7} className="p-6 text-center text-muted-foreground">
                   Nenhum processo cadastrado.
                 </td>
               </tr>
@@ -424,6 +438,13 @@ function ProcessosPage() {
                 <td className="num">{c.case_number || "—"}</td>
                 <td>{c.opposing_party || "—"}</td>
                 <td>{c.practice_area || "—"}</td>
+                {/* Em que pé está o processo — é o que a Advbox mantém em dia. */}
+                <td>
+                  {c.judicial_phase || "—"}
+                  {c.stage && (
+                    <span className="block text-xs text-muted-foreground">{c.stage}</span>
+                  )}
+                </td>
                 <td>{c.responsible_lawyer || "—"}</td>
                 {canWrite && (
                   <td className="p-3 text-right whitespace-nowrap">

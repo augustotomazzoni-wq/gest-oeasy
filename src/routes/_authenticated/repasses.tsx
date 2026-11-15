@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { TransferStatusTag } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -24,8 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ClienteLink } from "@/components/ClienteDetalhe";
-import { ExtratoCliente } from "@/components/ExtratoCliente";
+import { ClienteLink, ExtratoCliente } from "@/components/ExtratoCliente";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, dateBR, todayISO, TRANSFER_STATUS_LABEL } from "@/lib/format";
 import { dropUndefined } from "@/lib/utils";
@@ -71,9 +71,9 @@ function RepassesPage() {
   // Editar repasse é permissão à parte: nasce só para o Administrador e pode
   // ser liberada por perfil na tela Usuários e Perfis de Acesso.
   const canEdit = can("repasses", "edit");
-  const [editTarget, setEditTarget] = useState<
-    { id: string; name: string; status: string } | null
-  >(null);
+  const [editTarget, setEditTarget] = useState<{ id: string; name: string; status: string } | null>(
+    null,
+  );
   const [editForm, setEditForm] = useState({
     amount: "",
     scheduled_for: todayISO(),
@@ -90,20 +90,28 @@ function RepassesPage() {
     null,
   );
   const [payBank, setPayBank] = useState("");
+  // O repasse costuma ser lançado depois de feito: a data é a do dia em
+  // que o dinheiro saiu, não a do dia em que alguém sentou para registrar.
+  const [payDate, setPayDate] = useState(todayISO());
   const [cancelTarget, setCancelTarget] = useState<{ id: string; name: string } | null>(null);
   // Extrato para mandar à cliente.
   const [extrato, setExtrato] = useState<{ id: string; name: string } | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+  // Busca pelo nome da cliente, que vale para as duas listas da tela.
+  const [busca, setBusca] = useState("");
 
   const { data, isLoading } = useQuery({
     queryKey: ["repasses"],
     queryFn: async () => {
       const [transfers, balances, banks] = await Promise.all([
-        supabase
-          .from("client_transfers")
-          .select("*, clients(name)")
-          .order("created_at", { ascending: false }),
-        supabase.from("v_client_balances").select("*"),
+        todas(
+          supabase
+            .from("client_transfers")
+            .select("*, clients(name)")
+            .order("created_at", { ascending: false })
+            .order("id"),
+        ),
+        todas(supabase.from("v_client_balances").select("*").order("client_id")),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
       ]);
       throwFirstError(transfers, balances, banks);
@@ -195,11 +203,21 @@ function RepassesPage() {
   });
 
   const markPaid = useMutation({
-    mutationFn: async ({ id, bankAccountId }: { id: string; bankAccountId: string }) => {
+    mutationFn: async ({
+      id,
+      bankAccountId,
+      paidOn,
+    }: {
+      id: string;
+      bankAccountId: string;
+      paidOn: string;
+    }) => {
       if (!profile) throw new Error("Perfil não carregado");
+      if (!paidOn) throw new Error("Informe a data em que o repasse foi pago");
+      if (paidOn > todayISO()) throw new Error("A data do pagamento não pode ser no futuro");
       const { error } = await supabase
         .from("client_transfers")
-        .update({ status: "pago", paid_on: todayISO(), bank_account_id: bankAccountId })
+        .update({ status: "pago", paid_on: paidOn, bank_account_id: bankAccountId })
         .eq("id", id);
       if (error) throw error;
 
@@ -210,7 +228,7 @@ function RepassesPage() {
         action: "repasse_pago",
         table_name: "client_transfers",
         record_id: id,
-        new_values: { bank_account_id: bankAccountId },
+        new_values: { bank_account_id: bankAccountId, paid_on: paidOn },
       });
     },
     onSuccess: () => {
@@ -269,21 +287,30 @@ function RepassesPage() {
     onError: (e: Error) => toast.error("Erro ao cancelar", { description: friendlyError(e) }),
   });
 
+  // Sempre passa pela confirmação, mesmo com a conta já definida: é ali que
+  // se confere a data, e um clique só não deve dar um repasse como pago.
   function onMarkPaidClick(t: { id: string; bank_account_id: string | null }) {
-    if (t.bank_account_id) {
-      markPaid.mutate({ id: t.id, bankAccountId: t.bank_account_id });
-      return;
-    }
     setPayTarget(t);
-    setPayBank("");
+    setPayBank(t.bank_account_id ?? "");
+    setPayDate(todayISO());
   }
 
   const pendingTotal = (data?.balances ?? []).reduce((s, b) => s + num(b.pending_transfer), 0);
   // Só quem o escritório ainda deve. Cliente já quitada polui a lista e
   // esconde justamente quem precisa ser pago, então sai daqui.
+  const semAcento = (v: unknown) =>
+    String(v ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+  const termo = semAcento(busca).trim();
   const devedores = (data?.balances ?? [])
     .filter((b) => num(b.pending_transfer) > 0.01)
+    .filter((b) => !termo || semAcento(b.name).includes(termo))
     .sort((a, b) => num(b.pending_transfer) - num(a.pending_transfer));
+  const repassesListados = (data?.transfers ?? []).filter(
+    (t) => !termo || semAcento((t.clients as { name?: string } | null)?.name).includes(termo),
+  );
 
   return (
     <>
@@ -454,6 +481,20 @@ function RepassesPage() {
         </p>
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Input
+          className="max-w-sm"
+          placeholder="Buscar pelo nome da cliente…"
+          value={busca}
+          onChange={(e) => setBusca(e.target.value)}
+        />
+        {busca && (
+          <Button variant="ghost" size="sm" onClick={() => setBusca("")}>
+            Limpar
+          </Button>
+        )}
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
         <div className="panel overflow-x-auto">
           <table className="w-full text-sm">
@@ -475,14 +516,14 @@ function RepassesPage() {
                   </td>
                 </tr>
               )}
-              {!isLoading && (data?.transfers.length ?? 0) === 0 && (
+              {!isLoading && repassesListados.length === 0 && (
                 <tr>
                   <td colSpan={6} className="p-6 text-center text-muted-foreground">
-                    Nenhum repasse registrado.
+                    {termo ? "Nenhum repasse para essa busca." : "Nenhum repasse registrado."}
                   </td>
                 </tr>
               )}
-              {(data?.transfers ?? []).map((t) => (
+              {repassesListados.map((t) => (
                 <tr key={t.id} className="border-b border-border/60 last:border-0">
                   <td className="p-3 font-medium">
                     {(t.clients as { name: string } | null)?.name ?? "—"}
@@ -595,8 +636,18 @@ function RepassesPage() {
       <Dialog open={!!payTarget} onOpenChange={(v) => !v && setPayTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>De qual conta saiu o repasse?</DialogTitle>
+            <DialogTitle>Confirmar o pagamento do repasse</DialogTitle>
           </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="repasse-pago-em">Pago em</Label>
+            <Input
+              id="repasse-pago-em"
+              type="date"
+              max={todayISO()}
+              value={payDate}
+              onChange={(e) => setPayDate(e.target.value)}
+            />
+          </div>
           <div className="space-y-2">
             <Label>Conta de saída</Label>
             <Select value={payBank} onValueChange={setPayBank}>
@@ -617,9 +668,10 @@ function RepassesPage() {
               Cancelar
             </Button>
             <Button
-              disabled={!payBank || markPaid.isPending}
+              disabled={!payBank || !payDate || markPaid.isPending}
               onClick={() =>
-                payTarget && markPaid.mutate({ id: payTarget.id, bankAccountId: payBank })
+                payTarget &&
+                markPaid.mutate({ id: payTarget.id, bankAccountId: payBank, paidOn: payDate })
               }
             >
               {markPaid.isPending ? "Salvando…" : "Confirmar pagamento"}
@@ -726,8 +778,8 @@ function RepassesPage() {
             <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
               <p className="text-sm font-medium">Estornar este repasse</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                O repasse é cancelado e o valor volta a aparecer como devido à cliente. Se já
-                estava pago, sai também do fluxo de caixa.
+                O repasse é cancelado e o valor volta a aparecer como devido à cliente. Se já estava
+                pago, sai também do fluxo de caixa.
               </p>
               <div className="mt-2 space-y-2">
                 <Label htmlFor="emotivo" className="text-xs">

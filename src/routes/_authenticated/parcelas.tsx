@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { todas } from "@/lib/paginar";
 import { PageHeader } from "@/components/layout/AppLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -23,7 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ClienteLink } from "@/components/ClienteDetalhe";
+import { ClienteLink } from "@/components/ExtratoCliente";
 import { useAuth } from "@/hooks/useAuth";
 import { money, num, round2, dateBR, todayISO, daysBetween } from "@/lib/format";
 import { friendlyError, throwFirstError } from "@/lib/errors";
@@ -128,7 +129,6 @@ type ReceiptRow = {
   reversal_reason: string | null;
 };
 
-
 const FILTERS = [
   { key: "TODAS", label: "Todas" },
   { key: "ATRASADA", label: "Atrasadas" },
@@ -158,6 +158,9 @@ function ParcelasPage() {
     if (filtro) setFilter(filtro);
   }, [filtro]);
   const [target, setTarget] = useState<Row | null>(null);
+  // Os campos do rateio só abrem quando a pessoa pede, ou quando o caso
+  // exige (pagamento dividido, ou uma recusa por causa da divisão).
+  const [ajustar, setAjustar] = useState(false);
   const [pay, setPay] = useState({
     received_on: todayISO(),
     total_amount: "",
@@ -202,13 +205,16 @@ function ParcelasPage() {
     queryKey: ["parcela-recebimentos", historyOf?.id],
     enabled: !!historyOf,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("receipts")
-        .select(
-          "id, installment_id, received_on, total_amount, fee_amount, success_fee_amount, client_amount, client_amount_received_by_firm, cost_reimbursement, payment_method, reference, reversed_at, reversal_reason",
-        )
-        .eq("installment_id", historyOf!.id)
-        .order("received_on", { ascending: false });
+      const { data, error } = await todas(
+        supabase
+          .from("receipts")
+          .select(
+            "id, installment_id, received_on, total_amount, fee_amount, success_fee_amount, client_amount, client_amount_received_by_firm, cost_reimbursement, payment_method, reference, reversed_at, reversal_reason",
+          )
+          .eq("installment_id", historyOf!.id)
+          .order("received_on", { ascending: false })
+          .order("id"),
+      );
       if (error) throw error;
       return (data ?? []) as unknown as ReceiptRow[];
     },
@@ -271,11 +277,14 @@ function ParcelasPage() {
     queryKey: ["parcelas"],
     queryFn: async () => {
       const [inst, clients, banks] = await Promise.all([
-        supabase
-          .from("v_installments")
-          .select("*")
-          .order("due_date", { ascending: true, nullsFirst: false }),
-        supabase.from("clients").select("id, name").is("deleted_at", null),
+        todas(
+          supabase
+            .from("v_installments")
+            .select("*")
+            .order("due_date", { ascending: true, nullsFirst: false })
+            .order("id"),
+        ),
+        todas(supabase.from("clients").select("id, name").is("deleted_at", null).order("id")),
         supabase.from("bank_accounts").select("id, name").eq("active", true).order("name"),
       ]);
       throwFirstError(inst, clients, banks);
@@ -333,6 +342,7 @@ function ParcelasPage() {
     );
     const remaining = remainingFee + remainingSuccess + remainingClient + remainingCosts;
     setTarget(row);
+    setAjustar(false);
     if (isCobrancaOnly) {
       // Cobrança só confirma o que a cliente recebeu direto: honorários,
       // sucumbência e reembolso ficam zerados e travados.
@@ -426,6 +436,8 @@ function ParcelasPage() {
 
   function changeDestination(destination: string) {
     const clientAmount = num(Number(pay.client_amount));
+    // No pagamento dividido não há como adivinhar quanto foi para cada lado.
+    if (destination === "dividido") setAjustar(true);
     setPay({
       ...pay,
       receipt_destination: destination,
@@ -607,7 +619,12 @@ function ParcelasPage() {
         setTransferDate(todayISO());
       }
     },
-    onError: (e: Error) => toast.error("Erro ao registrar", { description: friendlyError(e) }),
+    onError: (e: Error) => {
+      // Quase toda recusa aqui é sobre a divisão: abre os campos para a
+      // pessoa ver o que precisa corrigir.
+      setAjustar(true);
+      toast.error("Erro ao registrar", { description: friendlyError(e) });
+    },
   });
 
   /** Cria o repasse a partir do recebimento, com o valor que já passou pela conta. */
@@ -628,8 +645,7 @@ function ParcelasPage() {
       setTransferTarget(null);
       void qc.invalidateQueries();
     },
-    onError: (e: Error) =>
-      toast.error("Erro ao criar repasse", { description: friendlyError(e) }),
+    onError: (e: Error) => toast.error("Erro ao criar repasse", { description: friendlyError(e) }),
   });
 
   return (
@@ -684,8 +700,8 @@ function ParcelasPage() {
               <th>Parcela</th>
               <th>Vencimento</th>
               <th className="text-right">Valor</th>
-              <th className="text-right">Escritório</th>
-              <th className="text-right">Cliente</th>
+              <th className="text-right">Parte do escritório</th>
+              <th className="text-right">Parte da cliente</th>
               <th className="text-right">Recebido</th>
               <th className="text-right">Saldo</th>
               <th>Situação</th>
@@ -843,122 +859,6 @@ function ParcelasPage() {
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="fe">Honorários contratuais</Label>
-              <Input
-                id="fe"
-                type="number"
-                min="0"
-                step="0.01"
-                value={pay.fee_amount}
-                disabled={isCobrancaOnly}
-                onChange={(e) => setPay({ ...pay, fee_amount: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="sf">Sucumbência</Label>
-              <Input
-                id="sf"
-                type="number"
-                min="0"
-                step="0.01"
-                value={pay.success_fee_amount}
-                disabled={isCobrancaOnly}
-                onChange={(e) => setPay({ ...pay, success_fee_amount: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="ca">Valor total pertencente à cliente</Label>
-              <Input
-                id="ca"
-                type="number"
-                min="0"
-                step="0.01"
-                value={pay.client_amount}
-                onChange={(e) => {
-                  const value = num(Number(e.target.value));
-                  setPay({
-                    ...pay,
-                    client_amount: e.target.value,
-                    client_amount_received_by_firm:
-                      pay.receipt_destination === "conta_escritorio"
-                        ? value.toFixed(2)
-                        : pay.client_amount_received_by_firm,
-                    client_amount_received_direct:
-                      pay.receipt_destination === "cliente_direto"
-                        ? value.toFixed(2)
-                        : pay.receipt_destination === "conta_escritorio"
-                          ? "0.00"
-                          : pay.client_amount_received_direct,
-                  });
-                }}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="cr">Reembolso de custas</Label>
-              <Input
-                id="cr"
-                type="number"
-                min="0"
-                step="0.01"
-                value={pay.cost_reimbursement}
-                disabled={isCobrancaOnly}
-                onChange={(e) => setPay({ ...pay, cost_reimbursement: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="client-firm">Da cliente, quanto entrou no escritório?</Label>
-              <Input
-                id="client-firm"
-                type="number"
-                min="0"
-                step="0.01"
-                value={pay.client_amount_received_by_firm}
-                disabled={isCobrancaOnly}
-                onChange={(e) => setPay({ ...pay, client_amount_received_by_firm: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">
-                Este valor ficará pendente de repasse.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="client-direct">Quanto a cliente recebeu diretamente?</Label>
-              <Input
-                id="client-direct"
-                type="number"
-                min="0"
-                step="0.01"
-                value={pay.client_amount_received_direct}
-                onChange={(e) => setPay({ ...pay, client_amount_received_direct: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">Não entra no caixa nem gera repasse.</p>
-            </div>
-            <div className="panel grid gap-2 p-3 text-sm sm:col-span-2 sm:grid-cols-2">
-              <p>
-                Ficou para o escritório:{" "}
-                <strong className="num">
-                  {money(num(Number(pay.fee_amount)) + num(Number(pay.success_fee_amount)))}
-                </strong>
-              </p>
-              <p>
-                Pertence à cliente: <strong className="num">{money(pay.client_amount)}</strong>
-              </p>
-              <p>
-                Entrou na conta do escritório:{" "}
-                <strong className="num">
-                  {money(
-                    num(Number(pay.fee_amount)) +
-                      num(Number(pay.success_fee_amount)) +
-                      num(Number(pay.cost_reimbursement)) +
-                      num(Number(pay.client_amount_received_by_firm)),
-                  )}
-                </strong>
-              </p>
-              <p>
-                A repassar para a cliente:{" "}
-                <strong className="num">{money(pay.client_amount_received_by_firm)}</strong>
-              </p>
-            </div>
-            <div className="space-y-2">
               <Label>Conta bancária</Label>
               <Select
                 value={pay.bank_account_id}
@@ -996,6 +896,160 @@ function ParcelasPage() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="panel grid gap-2 p-3 text-sm sm:col-span-2 sm:grid-cols-2">
+              <p>
+                Ficou para o escritório:{" "}
+                <strong className="num">
+                  {money(num(Number(pay.fee_amount)) + num(Number(pay.success_fee_amount)))}
+                </strong>
+              </p>
+              <p>
+                Pertence à cliente: <strong className="num">{money(pay.client_amount)}</strong>
+              </p>
+              <p>
+                Entrou na conta do escritório:{" "}
+                <strong className="num">
+                  {money(
+                    num(Number(pay.fee_amount)) +
+                      num(Number(pay.success_fee_amount)) +
+                      num(Number(pay.cost_reimbursement)) +
+                      num(Number(pay.client_amount_received_by_firm)),
+                  )}
+                </strong>
+              </p>
+              <p>
+                A repassar para a cliente:{" "}
+                <strong className="num">{money(pay.client_amount_received_by_firm)}</strong>
+              </p>
+            </div>
+            {/* No caso comum a divisão já vem certa da parcela: basta conferir o
+                resumo acima. Os seis campos ficam recolhidos para a baixa caber
+                em data, valor e conta. */}
+            <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAjustar(!ajustar)}
+              >
+                {ajustar ? "Esconder a divisão" : "Ajustar a divisão"}
+              </Button>
+              {!ajustar && (
+                <span className="text-xs text-muted-foreground">
+                  A divisão segue a composição prevista da parcela.
+                </span>
+              )}
+            </div>
+            {ajustar && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="fe">Honorários contratuais</Label>
+                  <Input
+                    id="fe"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={pay.fee_amount}
+                    disabled={isCobrancaOnly}
+                    onChange={(e) => setPay({ ...pay, fee_amount: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sf">Sucumbência</Label>
+                  <Input
+                    id="sf"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={pay.success_fee_amount}
+                    disabled={isCobrancaOnly}
+                    onChange={(e) => setPay({ ...pay, success_fee_amount: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="ca">Valor total pertencente à cliente</Label>
+                  <Input
+                    id="ca"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={pay.client_amount}
+                    onChange={(e) => {
+                      const value = num(Number(e.target.value));
+                      setPay({
+                        ...pay,
+                        client_amount: e.target.value,
+                        client_amount_received_by_firm:
+                          pay.receipt_destination === "conta_escritorio"
+                            ? value.toFixed(2)
+                            : pay.client_amount_received_by_firm,
+                        client_amount_received_direct:
+                          pay.receipt_destination === "cliente_direto"
+                            ? value.toFixed(2)
+                            : pay.receipt_destination === "conta_escritorio"
+                              ? "0.00"
+                              : pay.client_amount_received_direct,
+                      });
+                    }}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="cr">Reembolso de custas</Label>
+                  <Input
+                    id="cr"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={pay.cost_reimbursement}
+                    disabled={isCobrancaOnly}
+                    onChange={(e) => setPay({ ...pay, cost_reimbursement: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="client-firm">Da cliente, quanto entrou no escritório?</Label>
+                  <Input
+                    id="client-firm"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={pay.client_amount_received_by_firm}
+                    disabled={isCobrancaOnly}
+                    onChange={(e) =>
+                      setPay({ ...pay, client_amount_received_by_firm: e.target.value })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Este valor ficará pendente de repasse.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="client-direct">Quanto a cliente recebeu diretamente?</Label>
+                  <Input
+                    id="client-direct"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={pay.client_amount_received_direct}
+                    onChange={(e) =>
+                      setPay({ ...pay, client_amount_received_direct: e.target.value })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Não entra no caixa nem gera repasse.
+                  </p>
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="allocation-reason">
+                    Justificativa se a divisão for diferente da parcela prevista
+                  </Label>
+                  <Textarea
+                    id="allocation-reason"
+                    value={pay.allocation_override_reason}
+                    onChange={(e) => setPay({ ...pay, allocation_override_reason: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="ref">Referência / comprovante</Label>
               <Input
@@ -1007,8 +1061,8 @@ function ParcelasPage() {
             {shortfall > 0.01 && (
               <div className="space-y-3 rounded-md border border-info/40 bg-info/5 p-3 sm:col-span-2">
                 <p className="text-sm font-medium">
-                  Faltam <span className="num">{money(shortfall)}</span> nesta parcela. O que
-                  fazer com esse valor?
+                  Faltam <span className="num">{money(shortfall)}</span> nesta parcela. O que fazer
+                  com esse valor?
                 </p>
                 <Select
                   value={pay.shortfall_action}
@@ -1096,16 +1150,6 @@ function ParcelasPage() {
                 onChange={(e) => setPay({ ...pay, notes: e.target.value })}
               />
             </div>
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="allocation-reason">
-                Justificativa se a divisão for diferente da parcela prevista
-              </Label>
-              <Textarea
-                id="allocation-reason"
-                value={pay.allocation_override_reason}
-                onChange={(e) => setPay({ ...pay, allocation_override_reason: e.target.value })}
-              />
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setTarget(null)}>
@@ -1164,25 +1208,23 @@ function ParcelasPage() {
 
                 {/* Só faz sentido repassar o que passou pela conta do escritório:
                     o que a cliente recebeu direto do banco nunca entrou aqui. */}
-                {!rc.reversed_at &&
-                  canWrite &&
-                  num(rc.client_amount_received_by_firm) > 0.01 && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="mt-2"
-                      onClick={() => {
-                        setTransferTarget({
-                          receiptId: rc.id,
-                          amount: num(rc.client_amount_received_by_firm),
-                          cliente: clientNameOf(historyOf),
-                        });
-                        setTransferDate(todayISO());
-                      }}
-                    >
-                      Pagar cliente {money(rc.client_amount_received_by_firm)}
-                    </Button>
-                  )}
+                {!rc.reversed_at && canWrite && num(rc.client_amount_received_by_firm) > 0.01 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2"
+                    onClick={() => {
+                      setTransferTarget({
+                        receiptId: rc.id,
+                        amount: num(rc.client_amount_received_by_firm),
+                        cliente: clientNameOf(historyOf),
+                      });
+                      setTransferDate(todayISO());
+                    }}
+                  >
+                    Pagar cliente {money(rc.client_amount_received_by_firm)}
+                  </Button>
+                )}
 
                 {rc.reversed_at ? (
                   <p className="mt-2 text-xs font-medium text-destructive">
@@ -1330,9 +1372,9 @@ function ParcelasPage() {
               />
             </div>
             <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-              O repasse é criado como <strong>pendente</strong> em Repasses a Clientes, já com o
-              PIX ou a conta da cliente preenchidos. Quando o dinheiro sair de verdade, você dá a
-              baixa por lá — é essa baixa que mexe no caixa.
+              O repasse é criado como <strong>pendente</strong> em Repasses a Clientes, já com o PIX
+              ou a conta da cliente preenchidos. Quando o dinheiro sair de verdade, você dá a baixa
+              por lá — é essa baixa que mexe no caixa.
             </p>
           </div>
           <DialogFooter>
