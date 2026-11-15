@@ -387,6 +387,36 @@ function valoresCliente(c: AdvCliente): Linha {
 
 type ClienteLocal = Linha & { id: string };
 
+/**
+ * Cadastros excluídos que vieram da Advbox, pelo id de lá.
+ *
+ * A exclusão aqui só esconde a linha: ela continua no banco, com o mesmo id
+ * da Advbox, e esse id não pode repetir. Se a pessoa voltar a ter processo
+ * com número, criar um cadastro novo bateria nesse id e derrubaria o lote
+ * inteiro. Então o excluído é reativado, com o histórico que já tinha.
+ */
+async function carregarExcluidos(
+  tabela: "clients" | "cases",
+  colunas: readonly string[],
+  organizationId: string,
+): Promise<Map<number, Linha & { id: string }>> {
+  const { data, error } = await todas(
+    supabaseAdmin
+      .from(tabela)
+      .select(`id, ${colunas.join(", ")}`)
+      .eq("organization_id", organizationId)
+      .not("deleted_at", "is", null)
+      .not("advbox_id", "is", null)
+      .order("id"),
+  );
+  if (error) throw new Error("Não foi possível ler os cadastros excluídos.");
+  const mapa = new Map<number, Linha & { id: string }>();
+  for (const linha of (data ?? []) as unknown as Array<Linha & { id: string }>) {
+    if (typeof linha["advbox_id"] === "number") mapa.set(linha["advbox_id"], linha);
+  }
+  return mapa;
+}
+
 async function carregarClientes(organizationId: string): Promise<ClienteLocal[]> {
   const { data, error } = await todas(
     supabaseAdmin
@@ -430,6 +460,8 @@ export async function sincronizarClientes(
   const ignorados = todosOsContatos.length - vindos.length;
 
   const indice = indiceDeClientes(await carregarClientes(organizationId));
+  const excluidos = await carregarExcluidos("clients", COLUNAS_CLIENTE, organizationId);
+  let reativados = 0;
 
   const atualizacoes: Linha[] = [];
   const insercoes: Linha[] = [];
@@ -454,6 +486,7 @@ export async function sincronizarClientes(
       continue;
     }
     const id = achado.tipo === "achou" ? achado.id : undefined;
+    const excluido = id ? undefined : excluidos.get(c.id);
 
     if (id) {
       if (jaNoLote.has(id)) continue;
@@ -461,8 +494,20 @@ export async function sincronizarClientes(
       atualizacoes.push({
         id,
         organization_id: organizationId,
+        // Toda linha do lote leva a mesma coluna; nas ativas já é vazio.
+        deleted_at: null,
         ...mesclar(COLUNAS_CLIENTE, daAdvbox, indice.linhaDe(id)),
       });
+    } else if (excluido) {
+      if (jaNoLote.has(excluido.id)) continue;
+      jaNoLote.add(excluido.id);
+      atualizacoes.push({
+        id: excluido.id,
+        organization_id: organizationId,
+        deleted_at: null,
+        ...mesclar(COLUNAS_CLIENTE, daAdvbox, excluido),
+      });
+      reativados += 1;
     } else {
       const marca = `novo:${c.id}`;
       if (jaNoLote.has(marca)) continue;
@@ -477,7 +522,7 @@ export async function sincronizarClientes(
 
   await gravar("clients", atualizacoes, insercoes, avisos);
 
-  const resumo = `Clientes: ${insercoes.length} cadastrado(s), ${atualizacoes.length} atualizado(s).`;
+  const resumo = `Clientes: ${insercoes.length} cadastrado(s), ${atualizacoes.length - reativados} atualizado(s)${reativados ? `, ${reativados} reativado(s)` : ""}.`;
   await registrarResultado(organizationId, resumo);
   await registrarAuditoria(
     organizationId,
@@ -564,6 +609,10 @@ export async function sincronizarProcessos(
   const ignorados = todosOsProcessos.length - vindos.length;
 
   const indiceClientes = indiceDeClientes(await carregarClientes(organizationId));
+  const clientesExcluidos = await carregarExcluidos("clients", COLUNAS_CLIENTE, organizationId);
+  const processosExcluidos = await carregarExcluidos("cases", COLUNAS_PROCESSO, organizationId);
+  // Clientes excluídos que voltam porque agora têm processo com número.
+  const clientesParaReativar = new Map<string, Linha>();
   const avisos: string[] = [];
 
   // ---- 1) Os clientes que existem lá e ainda não aqui ----
@@ -576,6 +625,14 @@ export async function sincronizarProcessos(
     const nome = texto(titular.name) as string;
     const achado = indiceClientes.achar(titular.customer_id, titular.identification, nome);
     if (achado.tipo !== "novo") continue;
+    const excluido =
+      typeof titular.customer_id === "number"
+        ? clientesExcluidos.get(titular.customer_id)
+        : undefined;
+    if (excluido) {
+      clientesParaReativar.set(excluido.id, excluido);
+      continue;
+    }
     const chave = titular.customer_id ?? `nome:${chaveNome(nome)}`;
     if (faltantes.has(chave)) continue;
     faltantes.set(chave, {
@@ -586,6 +643,23 @@ export async function sincronizarProcessos(
       tax_id: texto(titular.identification),
       notes: "Cadastrado ao atualizar os processos pela Advbox",
     });
+  }
+
+  if (clientesParaReativar.size) {
+    const ids = [...clientesParaReativar.keys()];
+    const { error } = await supabaseAdmin
+      .from("clients")
+      .update({ deleted_at: null })
+      .in("id", ids);
+    if (error) {
+      avisos.push(
+        `Não foi possível reativar ${ids.length} cliente(s) excluído(s): ${error.message}`,
+      );
+    } else {
+      for (const [id, linha] of clientesParaReativar) {
+        indiceClientes.registrar(id, linha["advbox_id"], linha["tax_id"], linha["name"]);
+      }
+    }
   }
 
   let clientesCriados = 0;
@@ -669,13 +743,26 @@ export async function sincronizarProcessos(
       // outra marca para ser reconhecido.
       (!numero && pasta ? porPasta.get(chaveNome(pasta)) : undefined);
 
+    const excluido = id ? undefined : processosExcluidos.get(p.id);
+
     if (id) {
       if (jaNoLote.has(id)) continue;
       jaNoLote.add(id);
       atualizacoes.push({
         id,
         organization_id: organizationId,
+        deleted_at: null,
         ...mesclar(COLUNAS_PROCESSO, daAdvbox, porId.get(id)),
+      });
+    } else if (excluido) {
+      // Processo excluído que agora tem número: volta, em vez de duplicar.
+      if (jaNoLote.has(excluido.id)) continue;
+      jaNoLote.add(excluido.id);
+      atualizacoes.push({
+        id: excluido.id,
+        organization_id: organizationId,
+        deleted_at: null,
+        ...mesclar(COLUNAS_PROCESSO, daAdvbox, excluido),
       });
     } else {
       const marca = `novo:${p.id}`;
@@ -698,7 +785,7 @@ export async function sincronizarProcessos(
   return {
     criados: insercoes.length,
     atualizados: atualizacoes.length,
-    clientesCriados,
+    clientesCriados: clientesCriados + clientesParaReativar.size,
     lidosDaAdvbox: todosOsProcessos.length,
     ignorados,
     avisos,
