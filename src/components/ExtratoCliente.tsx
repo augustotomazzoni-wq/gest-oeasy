@@ -223,18 +223,52 @@ export function ExtratoCliente({
     lista.slice().sort((a, b) => (data(a) ?? "9999").localeCompare(data(b) ?? "9999"));
 
   const semAcordo = p.length === 0 && t.length === 0;
+  const [modo, setModo] = useState<Modo>(lerModo);
+  const trocarModo = (m: Modo) => {
+    setModo(m);
+    try {
+      localStorage.setItem(CHAVE_MODO, m);
+    } catch {
+      // Sem armazenamento a escolha só não fica lembrada.
+    }
+  };
 
   return (
     <Dialog open={!!clientId} onOpenChange={(v) => !v && onClose()}>
       {/* Uma tela só, para dar o print e mandar. Se a lista for longa demais,
           o conteúdo inteiro encolhe para caber — nada fica embaixo da dobra. */}
       <DialogContent className="flex max-h-[96vh] w-[97vw] max-w-[1200px] flex-col gap-3 overflow-hidden p-5 sm:max-w-[1200px]">
-        <DialogHeader className="pr-8">
-          <DialogTitle>Extrato de {nome}</DialogTitle>
-          <DialogDescription>
-            Posição em {dateBR(todayISO())}. Verde é a parte da cliente; azul, os honorários do
-            escritório.
-          </DialogDescription>
+        <DialogHeader className="flex-row flex-wrap items-start justify-between gap-3 space-y-0 pr-8">
+          <div>
+            <DialogTitle>Extrato de {nome}</DialogTitle>
+            <DialogDescription>
+              Posição em {dateBR(todayISO())}. Verde é a parte da cliente; azul, a do escritório.
+            </DialogDescription>
+          </div>
+          <div
+            role="group"
+            aria-label="Formato do extrato"
+            className="flex rounded-md border border-border p-0.5 text-xs"
+          >
+            {(
+              [
+                ["simples", "Simplificado"],
+                ["completo", "Completo"],
+              ] as const
+            ).map(([m, rotulo]) => (
+              <button
+                key={m}
+                type="button"
+                aria-pressed={modo === m}
+                onClick={() => trocarModo(m)}
+                className={`rounded px-3 py-1 transition-colors ${
+                  modo === m ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                }`}
+              >
+                {rotulo}
+              </button>
+            ))}
+          </div>
         </DialogHeader>
 
         {isLoading && <p className="py-8 text-center text-muted-foreground">Carregando…</p>}
@@ -249,7 +283,29 @@ export function ExtratoCliente({
           </p>
         )}
 
-        {!isLoading && !error && !semAcordo && (
+        {!isLoading && !error && !semAcordo && modo === "simples" && (
+          <CabeNaTela>
+            <Simplificado
+              total={totalAcordo}
+              dela={parteCliente}
+              nosso={honorarios + reembolso}
+              reembolso={reembolso}
+              delaRecebeu={jaComEla}
+              nossoRecebeu={honorariosEntrou + reembolsoEntrou}
+              delaFalta={totalDelaAinda}
+              comOEscritorio={faltaRepassar}
+              nossoFalta={aEntrarHonorarios + aEntrarReembolso}
+              proximas={ordenarPorData(emAberto, (x) => x.due_date).map((x) => ({
+                id: x.id,
+                data: x.due_date,
+                valor: num(x.balance),
+                dela: Math.max(num(x.client_amount) - num(x.paid_client), 0),
+              }))}
+            />
+          </CabeNaTela>
+        )}
+
+        {!isLoading && !error && !semAcordo && modo === "completo" && (
           <CabeNaTela>
             <div className="space-y-3 text-sm">
               <div className="grid gap-3 md:grid-cols-2">
@@ -477,6 +533,164 @@ export function ExtratoCliente({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+type Modo = "simples" | "completo";
+const CHAVE_MODO = "extrato-modo";
+
+/** O formato escolhido da última vez; na primeira, o simplificado. */
+function lerModo(): Modo {
+  try {
+    return localStorage.getItem(CHAVE_MODO) === "completo" ? "completo" : "simples";
+  } catch {
+    return "simples";
+  }
+}
+
+/**
+ * O extrato em uma olhada: o total, quanto é de cada um, quanto cada um já
+ * recebeu, quanto falta e quando vêm as próximas parcelas. Para a cliente que
+ * só quer saber "quanto e quando", sem o caminho do dinheiro.
+ */
+function Simplificado({
+  total,
+  dela,
+  nosso,
+  reembolso,
+  delaRecebeu,
+  nossoRecebeu,
+  delaFalta,
+  comOEscritorio,
+  nossoFalta,
+  proximas,
+}: {
+  total: number;
+  dela: number;
+  nosso: number;
+  reembolso: number;
+  delaRecebeu: number;
+  nossoRecebeu: number;
+  delaFalta: number;
+  comOEscritorio: number;
+  nossoFalta: number;
+  proximas: { id: string; data: string | null; valor: number; dela: number }[];
+}) {
+  // Em colunas de jornal: a data seguinte fica embaixo, não ao lado.
+  const colunas = proximas.length > 16 ? "sm:columns-3" : proximas.length > 6 ? "sm:columns-2" : "";
+  return (
+    <div className="space-y-3 text-sm">
+      <section className="flex flex-wrap items-baseline justify-between gap-2 rounded-md border-2 border-primary/30 bg-accent/30 px-4 py-3">
+        <span className="font-display text-base font-semibold">Valor total do acordo</span>
+        <span className="num text-3xl font-bold tabular-nums">{money(total)}</span>
+      </section>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Lado
+          titulo="Da cliente"
+          cor="cliente"
+          total={dela}
+          recebeu={delaRecebeu}
+          falta={delaFalta}
+          {...(comOEscritorio > 0.01
+            ? { notaFalta: `Inclui ${money(comOEscritorio)} já com o escritório, para repassar` }
+            : {})}
+        />
+        <Lado
+          titulo="Do escritório"
+          cor="escritorio"
+          total={nosso}
+          recebeu={nossoRecebeu}
+          falta={nossoFalta}
+          {...(reembolso > 0.01
+            ? { notaTotal: `Inclui ${money(reembolso)} de devolução de despesas do processo` }
+            : {})}
+        />
+      </div>
+
+      <section className="rounded-md border border-border p-3">
+        <h3 className="mb-2 font-display text-sm font-semibold">Próximas parcelas</h3>
+        {proximas.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Nenhuma parcela em aberto — o acordo já foi todo pago.
+          </p>
+        ) : (
+          <div className={`gap-x-6 ${colunas}`}>
+            {proximas.map((x) => (
+              <div
+                key={x.id}
+                className="flex break-inside-avoid items-baseline justify-between gap-3 border-b border-border/60 py-1 text-xs"
+              >
+                <span className="font-medium">{x.data ? dateBR(x.data) : "Sem data definida"}</span>
+                <span className="text-right">
+                  <span className="num tabular-nums">{money(x.valor)}</span>
+                  <span className="ml-2 text-muted-foreground">
+                    cliente{" "}
+                    <span className={`num tabular-nums ${COR.cliente.texto}`}>{money(x.dela)}</span>
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <p className="text-xs text-muted-foreground">
+        Valores conferidos em {dateBR(todayISO())}. As parcelas futuras dependem do pagamento pela
+        empresa.
+      </p>
+    </div>
+  );
+}
+
+/** Um dos dois lados do extrato simplificado: o da cliente ou o do escritório. */
+function Lado({
+  titulo,
+  cor,
+  total,
+  recebeu,
+  falta,
+  notaTotal,
+  notaFalta,
+}: {
+  titulo: string;
+  cor: Cor;
+  total: number;
+  recebeu: number;
+  falta: number;
+  notaTotal?: string;
+  notaFalta?: string;
+}) {
+  return (
+    <section className="rounded-md border border-border p-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 className="flex items-center gap-2 font-display text-base font-semibold">
+          <span aria-hidden className={`inline-block size-3 rounded-full ${COR[cor].fundo}`} />
+          {titulo}
+        </h3>
+        <span className={`num text-2xl font-bold tabular-nums ${COR[cor].texto}`}>
+          {money(total)}
+        </span>
+      </div>
+      {notaTotal && <p className="text-xs text-muted-foreground">{notaTotal}</p>}
+      <Barra
+        partes={[
+          { valor: recebeu, cor },
+          { valor: falta, cor: null },
+        ]}
+      />
+      <div className="flex items-baseline justify-between gap-3 py-1">
+        <span>Já recebeu</span>
+        <span className="num font-semibold tabular-nums">{money(recebeu)}</span>
+      </div>
+      <div className="flex items-baseline justify-between gap-3 border-t border-border py-1">
+        <span>
+          Ainda vai receber
+          {notaFalta && <span className="block text-xs text-muted-foreground">{notaFalta}</span>}
+        </span>
+        <span className="num font-semibold tabular-nums">{money(falta)}</span>
+      </div>
+    </section>
   );
 }
 
